@@ -75,7 +75,8 @@ WantedBy=multi-user.target
   - no IP connectivity to the target host
   - OR all TCP traffic is blocked
   - OR all TLS traffic is blocked,
-- like most protocols on the Internet; this situation is observed in China behind the Great Chinese Firewall and in Russia on mobile networks
+- like most protocols on the Internet; 
+- this situation is observed in China behind the Great Chinese Firewall and in Russia on mobile networks
 
 ## Why Rust?
 - Long-running reliability and idempotent behavior
