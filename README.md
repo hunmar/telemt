@@ -248,10 +248,16 @@ enabled = true
 
 ## FAQ
 ### Recognizability for DPI and crawler
-Since version 1.1, we have debugged masking perfectly, for all clients without "presenting" a key, 
-we transparently direct traffic to the target host. 
-- We consider this a breakthrough aspect, which few people managed to achieve in perfect form.
-- Based on this: if configured correctly, **TLS mode is completely identical to real-life handshake + communication** with a specified host:
+Since version 1.1.0.0, we have debugged masking perfectly: for all clients without "presenting" a key, 
+we transparently direct traffic to the target host!
+
+- We consider this a breakthrough aspect, which has no stable analogues today
+- Based on this: if `telemt` configured correctly, **TLS mode is completely identical to real-life handshake + communication** with a specified host
+- Here is our evidence:
+  - 212.220.88.77 - "dummy" host, running `telemt`
+  - `petrovich.ru` - `tls` + `masking` host
+  - client that "presents" secret-key accesses the MTProxy resource
+  - client that does not "presents" secret-key gets transparent access to the specified resource:
 ```bash
 root@debian:~/telemt# curl -v -I --resolve petrovich.ru:443:212.220.88.77 https://petrovich.ru/
 * Added petrovich.ru:443:212.220.88.77 to DNS cache
