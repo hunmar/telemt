@@ -257,7 +257,8 @@ we transparently direct traffic to the target host!
   - 212.220.88.77 - "dummy" host, running `telemt`
   - `petrovich.ru` - `tls` + `masking` host
   - client WITH secret-key accesses the MTProxy resource:
-  <img width="576" height="702" alt="telemt" src="https://github.com/user-attachments/assets/39352afb-4a11-4ecc-9d91-9e8cfb20607d" />
+  <img width="360" height="439" alt="telemt" src="https://github.com/user-attachments/assets/39352afb-4a11-4ecc-9d91-9e8cfb20607d" />
+  
   - client WITHOUT secret-key gets transparent access to the specified resource:
 ```bash
 root@debian:~/telemt# curl -v -I --resolve petrovich.ru:443:212.220.88.77 https://petrovich.ru/
