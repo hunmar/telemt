@@ -256,8 +256,8 @@ we transparently direct traffic to the target host!
 - Here is our evidence:
     - 212.220.88.77 - "dummy" host, running `telemt`
     - `petrovich.ru` - `tls` + `masking` host, in HEX: `706574726f766963682e7275`
-    - No MITM + No Fake Certificates/Crypto - pure transparent TCP Splice to "best" upstream: MTProxy or tls/mask-host:
-      - DPI see legitimate HTTPS to `tls_host`, including valid chain-of-trust and entropy
+    - **No MITM + No Fake Certificates/Crypto** = pure transparent *TCP Splice* to "best" upstream: MTProxy or tls/mask-host:
+      - DPI see legitimate HTTPS to `tls_host`, including *valid chain-of-trust* and entropy
       - Crawlers completely satisfied receiving responses from `mask_host`
   #### Client WITH secret-key accesses the MTProxy resource:
   
