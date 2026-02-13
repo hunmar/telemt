@@ -45,6 +45,7 @@ If you have expertise in asynchronous network applications – we are open to id
   - [DPI](#how-does-dpi-see-mtproxy-tls)
   - [Whitelist on Network Level](#whitelist-on-ip)
 - [Build](#build)
+- [Docker](#docker)
 - [Why Rust?](#why-rust)
 
 ## Features
@@ -393,6 +394,40 @@ mv ./target/release/telemt /bin
 chmod +x /bin/telemt
 # Lets go!
 telemt config.toml
+```
+
+## Docker
+**Quick start (Docker Compose)**
+
+1. Edit `config.toml` in repo root (at least: port, users secrets, tls_domain)
+2. Start container:
+```bash
+docker compose up -d --build
+```
+3. Check logs:
+```bash
+docker compose logs -f telemt
+```
+4. Stop:
+```bash
+docker compose down
+```
+
+**Notes**
+- `docker-compose.yml` maps `./config.toml` to `/app/config.toml` (read-only)
+- By default it publishes `443:443` and runs with dropped capabilities (only `NET_BIND_SERVICE` is added)
+- If you really need host networking (usually only for some IPv6 setups) uncomment `network_mode: host`
+
+**Run without Compose**
+```bash
+docker build -t telemt:local .
+docker run --name telemt --restart unless-stopped \
+  -p 443:443 \
+  -e RUST_LOG=info \
+  -v "$PWD/config.toml:/app/config.toml:ro" \
+  --read-only \
+  --cap-drop ALL --cap-add NET_BIND_SERVICE \
+  telemt:local
 ```
 
 ## Why Rust?
