@@ -8,6 +8,8 @@
 
 Мы уже знаем о проблеме: она связана с dc=203 - Telegram CDN и сейчас есть подтверждённое исправление...
 
+🤐 ДОСТУПНО ТОЛЬКО В РЕЛИЗЕ 2.0.0.1 и последующих
+
 Сейчас оно принимо через добавление в конфиг:
 ```toml
 [dc_overrides]
@@ -23,6 +25,8 @@
 Many of you have encountered issues loading media from channels with over 100k subscribers…
 
 We’re already aware of the problem: it’s related to `dc=203` – Telegram CDN – and we now have a confirmed fix.
+
+🤐 AVAILABLE ONLY IN RELEASE 2.0.0.1 and later
 
 Currently, you can apply it by adding the following to your config:
 ```toml
