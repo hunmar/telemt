@@ -208,10 +208,6 @@ then Ctrl+X -> Y -> Enter to save
 ## Configuration
 ### Minimal Configuration for First Start
 ```toml
-# === UI ===
-# Users to show in the startup log (tg:// links)
-show_link = ["hello"]
-
 # === General Settings ===
 [general]
 prefer_ipv6 = false
@@ -239,6 +235,12 @@ ip = "0.0.0.0"
 
 [[server.listeners]]
 ip = "::"
+
+# Users to show in the startup log (tg:// links)
+[general.links]
+show = ["hello"] # Users to show in the startup log (tg:// links)
+# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
+# public_port = 443                  # Port for tg:// links (default: server.port)
 
 # === Timeouts (in seconds) ===
 [timeouts]
@@ -287,6 +289,10 @@ weight = 10
 # address = "127.0.0.1:9050"
 # enabled = false
 # weight = 1
+
+# === DC Address Overrides ===
+# [dc_overrides]
+# "203" = "91.105.192.100:443"
 ```
 ### Advanced
 #### Adtag

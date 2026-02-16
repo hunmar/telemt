@@ -256,6 +256,27 @@ pub struct GeneralConfig {
     /// Disable colored output in logs (useful for files/systemd)
     #[serde(default)]
     pub disable_colors: bool,
+
+    /// [general.links] — proxy link generation overrides
+    #[serde(default)]
+    pub links: LinksConfig,
+}
+
+/// `[general.links]` — proxy link generation settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LinksConfig {
+    /// List of usernames whose tg:// links to display at startup.
+    /// `"*"` = all users, `["alice", "bob"]` = specific users.
+    #[serde(default)]
+    pub show: ShowLink,
+
+    /// Public hostname/IP for tg:// link generation (overrides detected IP).
+    #[serde(default)]
+    pub public_host: Option<String>,
+
+    /// Public port for tg:// link generation (overrides server.port).
+    #[serde(default)]
+    pub public_port: Option<u16>,
 }
 
 impl Default for GeneralConfig {
@@ -274,6 +295,7 @@ impl Default for GeneralConfig {
             unknown_dc_log_path: default_unknown_dc_log_path(),
             log_level: LogLevel::Normal,
             disable_colors: false,
+            links: LinksConfig::default(),
         }
     }
 }
@@ -283,14 +305,24 @@ pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
 
-    #[serde(default = "default_listen_addr")]
-    pub listen_addr_ipv4: String,
+    #[serde(default)]
+    pub listen_addr_ipv4: Option<String>,
 
     #[serde(default)]
     pub listen_addr_ipv6: Option<String>,
 
     #[serde(default)]
     pub listen_unix_sock: Option<String>,
+
+    /// Unix socket file permissions (octal, e.g. "0666" or "0777").
+    /// Applied via chmod after bind. Default: no change (inherits umask).
+    #[serde(default)]
+    pub listen_unix_sock_perm: Option<String>,
+
+    /// Enable TCP listening. Default: true when no unix socket, false when
+    /// listen_unix_sock is set. Set explicitly to override auto-detection.
+    #[serde(default)]
+    pub listen_tcp: Option<bool>,
 
     #[serde(default)]
     pub metrics_port: Option<u16>,
@@ -306,9 +338,11 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
-            listen_addr_ipv4: default_listen_addr(),
+            listen_addr_ipv4: Some(default_listen_addr()),
             listen_addr_ipv6: Some("::".to_string()),
             listen_unix_sock: None,
+            listen_unix_sock_perm: None,
+            listen_tcp: None,
             metrics_port: None,
             metrics_whitelist: default_metrics_whitelist(),
             listeners: Vec::new(),
@@ -661,9 +695,25 @@ impl ProxyConfig {
         use rand::Rng;
         config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
 
-        // Migration: Populate listeners if empty
-        if config.server.listeners.is_empty() {
-            if let Ok(ipv4) = config.server.listen_addr_ipv4.parse::<IpAddr>() {
+        // Resolve listen_tcp: explicit value wins, otherwise auto-detect.
+        // If unix socket is set → TCP only when listen_addr_ipv4 or listeners are explicitly provided.
+        // If no unix socket → TCP always (backward compat).
+        let listen_tcp = config.server.listen_tcp.unwrap_or_else(|| {
+            if config.server.listen_unix_sock.is_some() {
+                // Unix socket present: TCP only if user explicitly set addresses or listeners
+                config.server.listen_addr_ipv4.is_some()
+                    || !config.server.listeners.is_empty()
+            } else {
+                true
+            }
+        });
+
+        // Migration: Populate listeners if empty (skip when listen_tcp = false)
+        if config.server.listeners.is_empty() && listen_tcp {
+            let ipv4_str = config.server.listen_addr_ipv4
+                .as_deref()
+                .unwrap_or("0.0.0.0");
+            if let Ok(ipv4) = ipv4_str.parse::<IpAddr>() {
                 config.server.listeners.push(ListenerConfig {
                     ip: ipv4,
                     announce_ip: None,
@@ -677,6 +727,11 @@ impl ProxyConfig {
                     });
                 }
             }
+        }
+
+        // Migration: show_link (top-level) → general.links.show
+        if !config.show_link.is_empty() && config.general.links.show.is_empty() {
+            config.general.links.show = config.show_link.clone();
         }
 
         // Migration: Populate upstreams if empty (Default Direct)

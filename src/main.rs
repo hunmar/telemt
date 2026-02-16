@@ -8,6 +8,8 @@ use tokio::signal;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 
 mod cli;
 mod config;
@@ -98,6 +100,37 @@ fn parse_cli() -> (String, bool, Option<String>) {
     }
 
     (config_path, silent, log_level)
+}
+
+fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
+    info!("--- Proxy Links ({}) ---", host);
+    for user_name in config.general.links.show.resolve_users(&config.access.users) {
+        if let Some(secret) = config.access.users.get(user_name) {
+            info!("User: {}", user_name);
+            if config.general.modes.classic {
+                info!(
+                    "  Classic: tg://proxy?server={}&port={}&secret={}",
+                    host, port, secret
+                );
+            }
+            if config.general.modes.secure {
+                info!(
+                    "  DD:      tg://proxy?server={}&port={}&secret=dd{}",
+                    host, port, secret
+                );
+            }
+            if config.general.modes.tls {
+                let domain_hex = hex::encode(&config.censorship.tls_domain);
+                info!(
+                    "  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
+                    host, port, secret, domain_hex
+                );
+            }
+        } else {
+            warn!("User '{}' in show_link not found", user_name);
+        }
+    }
+    info!("------------------------");
 }
 
 #[tokio::main]
@@ -476,35 +509,10 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     listener_conf.ip
                 };
 
-                if !config.show_link.is_empty() {
-                    info!("--- Proxy Links ({}) ---", public_ip);
-                    for user_name in config.show_link.resolve_users(&config.access.users) {
-                        if let Some(secret) = config.access.users.get(user_name) {
-                            info!("User: {}", user_name);
-                            if config.general.modes.classic {
-                                info!(
-                                    "  Classic: tg://proxy?server={}&port={}&secret={}",
-                                    public_ip, config.server.port, secret
-                                );
-                            }
-                            if config.general.modes.secure {
-                                info!(
-                                    "  DD:      tg://proxy?server={}&port={}&secret=dd{}",
-                                    public_ip, config.server.port, secret
-                                );
-                            }
-                            if config.general.modes.tls {
-                                let domain_hex = hex::encode(&config.censorship.tls_domain);
-                                info!(
-                                    "  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
-                                    public_ip, config.server.port, secret, domain_hex
-                                );
-                            }
-                        } else {
-                            warn!("User '{}' in show_link not found", user_name);
-                        }
-                    }
-                    info!("------------------------");
+                // Show per-listener proxy links only when public_host is not set
+                if config.general.links.public_host.is_none() && !config.general.links.show.is_empty() {
+                    let link_port = config.general.links.public_port.unwrap_or(config.server.port);
+                    print_proxy_links(&public_ip.to_string(), link_port, &config);
                 }
 
                 listeners.push(listener);
@@ -515,7 +523,104 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         }
     }
 
-    if listeners.is_empty() {
+    // Show proxy links once when public_host is set, OR when there are no TCP listeners
+    // (unix-only mode) — use detected IP as fallback
+    if !config.general.links.show.is_empty() && (config.general.links.public_host.is_some() || listeners.is_empty()) {
+        let (host, port) = if let Some(ref h) = config.general.links.public_host {
+            (h.clone(), config.general.links.public_port.unwrap_or(config.server.port))
+        } else {
+            let ip = detected_ip
+                .ipv4
+                .or(detected_ip.ipv6)
+                .map(|ip| ip.to_string());
+            if ip.is_none() {
+                warn!("show_link is configured but public IP could not be detected. Set public_host in config.");
+            }
+            (ip.unwrap_or_else(|| "UNKNOWN".to_string()), config.general.links.public_port.unwrap_or(config.server.port))
+        };
+
+        print_proxy_links(&host, port, &config);
+    }
+
+    // Unix socket setup (before listeners check so unix-only config works)
+    let mut has_unix_listener = false;
+    #[cfg(unix)]
+    if let Some(ref unix_path) = config.server.listen_unix_sock {
+        // Remove stale socket file if present (standard practice)
+        let _ = tokio::fs::remove_file(unix_path).await;
+
+        let unix_listener = UnixListener::bind(unix_path)?;
+
+        // Apply socket permissions if configured
+        if let Some(ref perm_str) = config.server.listen_unix_sock_perm {
+            match u32::from_str_radix(perm_str.trim_start_matches('0'), 8) {
+                Ok(mode) => {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(mode);
+                    if let Err(e) = std::fs::set_permissions(unix_path, perms) {
+                        error!("Failed to set unix socket permissions to {}: {}", perm_str, e);
+                    } else {
+                        info!("Listening on unix:{} (mode {})", unix_path, perm_str);
+                    }
+                }
+                Err(e) => {
+                    warn!("Invalid listen_unix_sock_perm '{}': {}. Ignoring.", perm_str, e);
+                    info!("Listening on unix:{}", unix_path);
+                }
+            }
+        } else {
+            info!("Listening on unix:{}", unix_path);
+        }
+
+        has_unix_listener = true;
+
+        let config = config.clone();
+        let stats = stats.clone();
+        let upstream_manager = upstream_manager.clone();
+        let replay_checker = replay_checker.clone();
+        let buffer_pool = buffer_pool.clone();
+        let rng = rng.clone();
+        let me_pool = me_pool.clone();
+        let ip_tracker = ip_tracker.clone();
+
+        tokio::spawn(async move {
+            let unix_conn_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+            loop {
+                match unix_listener.accept().await {
+                    Ok((stream, _)) => {
+                        let conn_id = unix_conn_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let fake_peer = SocketAddr::from(([127, 0, 0, 1], (conn_id % 65535) as u16));
+
+                        let config = config.clone();
+                        let stats = stats.clone();
+                        let upstream_manager = upstream_manager.clone();
+                        let replay_checker = replay_checker.clone();
+                        let buffer_pool = buffer_pool.clone();
+                        let rng = rng.clone();
+                        let me_pool = me_pool.clone();
+                        let ip_tracker = ip_tracker.clone();
+
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::proxy::client::handle_client_stream(
+                                stream, fake_peer, config, stats,
+                                upstream_manager, replay_checker, buffer_pool, rng,
+                                me_pool, ip_tracker,
+                            ).await {
+                                debug!(error = %e, "Unix socket connection error");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Unix socket accept error: {}", e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        });
+    }
+
+    if listeners.is_empty() && !has_unix_listener {
         error!("No listeners. Exiting.");
         std::process::exit(1);
     }
@@ -581,62 +686,6 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
             }
         });
     }
-
-	#[cfg(unix)]
-	if let Some(ref unix_path) = config.server.listen_unix_sock {
-		use tokio::net::UnixListener;  // ← добавь импорт, если его нет выше
-
-		// Удаляем старые файлы сокета, если они есть (стандартная практика)
-		let _ = tokio::fs::remove_file(unix_path).await;
-
-		let unix_listener = UnixListener::bind(unix_path)?;
-		info!("Listening on unix:{}", unix_path);
-
-		let config = config.clone();
-		let stats = stats.clone();
-		let upstream_manager = upstream_manager.clone();
-		let replay_checker = replay_checker.clone();
-		let buffer_pool = buffer_pool.clone();
-		let rng = rng.clone();
-		let me_pool = me_pool.clone();
-		let ip_tracker = ip_tracker.clone();
-
-		tokio::spawn(async move {
-			let unix_conn_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
-
-			loop {
-				match unix_listener.accept().await {
-					Ok((stream, _)) => {
-						let conn_id = unix_conn_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-						let fake_peer = SocketAddr::from(([127, 0, 0, 1], (conn_id % 65535) as u16));  // безопасный порт
-
-						let config = config.clone();
-						let stats = stats.clone();
-						let upstream_manager = upstream_manager.clone();
-						let replay_checker = replay_checker.clone();
-						let buffer_pool = buffer_pool.clone();
-						let rng = rng.clone();
-						let me_pool = me_pool.clone();
-						let ip_tracker = ip_tracker.clone();
-
-						tokio::spawn(async move {
-							if let Err(e) = crate::proxy::client::handle_client_stream(
-								stream, fake_peer, config, stats,
-								upstream_manager, replay_checker, buffer_pool, rng,
-								me_pool, ip_tracker,
-							).await {
-								debug!(error = %e, "Unix socket connection error");
-							}
-						});
-					}
-					Err(e) => {
-						error!("Unix socket accept error: {}", e);
-						tokio::time::sleep(Duration::from_millis(100)).await;
-					}
-				}
-			}
-		});
-	}
 
     match signal::ctrl_c().await {
         Ok(()) => info!("Shutting down..."),
