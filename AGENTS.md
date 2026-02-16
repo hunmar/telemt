@@ -1,5 +1,8 @@
 # AGENTS.md
 
+** Use general system promt from AGENTS_SYSTEM_PROMT.md **
+** Additional techiques and architectury details are here **
+
 This file provides guidance to agents when working with code in this repository.
 
 ## Build & Test Commands
