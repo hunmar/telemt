@@ -260,67 +260,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         info!("IP limits configured for {} users", config.access.user_max_unique_ips.len());
     }
 
-    // TLS front cache (optional emulation)
-    let mut tls_domains = Vec::with_capacity(1 + config.censorship.tls_domains.len());
-    tls_domains.push(config.censorship.tls_domain.clone());
-    for d in &config.censorship.tls_domains {
-        if !tls_domains.contains(d) {
-            tls_domains.push(d.clone());
-        }
-    }
-
-    let tls_cache: Option<Arc<TlsFrontCache>> = if config.censorship.tls_emulation {
-        let cache = Arc::new(TlsFrontCache::new(
-            &tls_domains,
-            config.censorship.fake_cert_len,
-            &config.censorship.tls_front_dir,
-        ));
-
-        let port = config.censorship.mask_port;
-        // Initial synchronous fetch to warm cache before serving clients.
-        for domain in tls_domains.clone() {
-            match crate::tls_front::fetcher::fetch_real_tls(
-                &domain,
-                port,
-                &domain,
-                Duration::from_secs(5),
-            )
-            .await
-            {
-                Ok(res) => cache.update_from_fetch(&domain, res).await,
-                Err(e) => warn!(domain = %domain, error = %e, "TLS emulation fetch failed"),
-            }
-        }
-
-        // Periodic refresh with jitter.
-        let cache_clone = cache.clone();
-        let domains = tls_domains.clone();
-        tokio::spawn(async move {
-            loop {
-                let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
-                let jitter_secs = rand::rng().random_range(0..=7200);
-                tokio::time::sleep(Duration::from_secs(base_secs + jitter_secs)).await;
-                for domain in &domains {
-                    match crate::tls_front::fetcher::fetch_real_tls(
-                        domain,
-                        port,
-                        domain,
-                        Duration::from_secs(5),
-                    )
-                    .await
-                    {
-                        Ok(res) => cache_clone.update_from_fetch(domain, res).await,
-                        Err(e) => warn!(domain = %domain, error = %e, "TLS emulation refresh failed"),
-                    }
-                }
-            }
-        });
-
-        Some(cache)
-    } else {
-        None
-    };
-
     // Connection concurrency limit
     let _max_connections = Arc::new(Semaphore::new(10_000));
 
@@ -498,6 +437,72 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
 
     let upstream_manager = Arc::new(UpstreamManager::new(config.upstreams.clone()));
     let buffer_pool = Arc::new(BufferPool::with_config(16 * 1024, 4096));
+
+    // TLS front cache (optional emulation)
+    let mut tls_domains = Vec::with_capacity(1 + config.censorship.tls_domains.len());
+    tls_domains.push(config.censorship.tls_domain.clone());
+    for d in &config.censorship.tls_domains {
+        if !tls_domains.contains(d) {
+            tls_domains.push(d.clone());
+        }
+    }
+
+    let tls_cache: Option<Arc<TlsFrontCache>> = if config.censorship.tls_emulation {
+        let cache = Arc::new(TlsFrontCache::new(
+            &tls_domains,
+            config.censorship.fake_cert_len,
+            &config.censorship.tls_front_dir,
+        ));
+
+        cache.load_from_disk().await;
+
+        let port = config.censorship.mask_port;
+        // Initial synchronous fetch to warm cache before serving clients.
+        for domain in tls_domains.clone() {
+            match crate::tls_front::fetcher::fetch_real_tls(
+                &domain,
+                port,
+                &domain,
+                Duration::from_secs(5),
+                Some(upstream_manager.clone()),
+            )
+            .await
+            {
+                Ok(res) => cache.update_from_fetch(&domain, res).await,
+                Err(e) => warn!(domain = %domain, error = %e, "TLS emulation fetch failed"),
+            }
+        }
+
+        // Periodic refresh with jitter.
+        let cache_clone = cache.clone();
+        let domains = tls_domains.clone();
+        let upstream_for_task = upstream_manager.clone();
+        tokio::spawn(async move {
+            loop {
+                let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
+                let jitter_secs = rand::rng().random_range(0..=7200);
+                tokio::time::sleep(Duration::from_secs(base_secs + jitter_secs)).await;
+                for domain in &domains {
+                    match crate::tls_front::fetcher::fetch_real_tls(
+                        domain,
+                        port,
+                        domain,
+                        Duration::from_secs(5),
+                        Some(upstream_for_task.clone()),
+                    )
+                    .await
+                    {
+                        Ok(res) => cache_clone.update_from_fetch(domain, res).await,
+                        Err(e) => warn!(domain = %domain, error = %e, "TLS emulation refresh failed"),
+                    }
+                }
+            }
+        });
+
+        Some(cache)
+    } else {
+        None
+    };
 
     // Middle-End ping before DC connectivity
     if let Some(ref pool) = me_pool {

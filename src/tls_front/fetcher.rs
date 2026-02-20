@@ -14,9 +14,12 @@ use rustls::client::ClientConfig;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError};
 
+use x509_parser::prelude::FromDer;
+use x509_parser::certificate::X509Certificate;
+
 use crate::crypto::SecureRandom;
 use crate::protocol::constants::{TLS_RECORD_APPLICATION, TLS_RECORD_HANDSHAKE};
-use crate::tls_front::types::{ParsedServerHello, TlsExtension, TlsFetchResult};
+use crate::tls_front::types::{ParsedServerHello, TlsExtension, TlsFetchResult, ParsedCertificateInfo};
 
 /// No-op verifier: accept any certificate (we only need lengths and metadata).
 #[derive(Debug)]
@@ -266,6 +269,52 @@ fn parse_server_hello(body: &[u8]) -> Option<ParsedServerHello> {
     })
 }
 
+fn parse_cert_info(certs: &[CertificateDer<'static>]) -> Option<ParsedCertificateInfo> {
+    let first = certs.first()?;
+    let (_rem, cert) = X509Certificate::from_der(first.as_ref()).ok()?;
+
+    let not_before = Some(cert.validity().not_before.to_datetime().unix_timestamp());
+    let not_after = Some(cert.validity().not_after.to_datetime().unix_timestamp());
+
+    let issuer_cn = cert
+        .issuer()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(|s| s.to_string());
+
+    let subject_cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(|s| s.to_string());
+
+    let san_names = cert
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .map(|san| {
+            san.value
+                .general_names
+                .iter()
+                .filter_map(|gn| match gn {
+                    x509_parser::extensions::GeneralName::DNSName(n) => Some(n.to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(ParsedCertificateInfo {
+        not_after_unix: not_after,
+        not_before_unix: not_before,
+        issuer_cn,
+        subject_cn,
+        san_names,
+    })
+}
+
 async fn fetch_via_raw_tls(
     host: &str,
     port: u16,
@@ -318,6 +367,7 @@ async fn fetch_via_raw_tls(
             app_sizes
         },
         total_app_data_len,
+        cert_info: None,
     })
 }
 
@@ -327,6 +377,7 @@ pub async fn fetch_real_tls(
     port: u16,
     sni: &str,
     connect_timeout: Duration,
+    upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
 ) -> Result<TlsFetchResult> {
     // Preferred path: raw TLS probe for accurate record sizing
     match fetch_via_raw_tls(host, port, sni, connect_timeout).await {
@@ -337,8 +388,26 @@ pub async fn fetch_real_tls(
     }
 
     // Fallback: rustls handshake to at least get certificate sizes
-    let addr = format!("{host}:{port}");
-    let stream = timeout(connect_timeout, TcpStream::connect(addr)).await??;
+    let stream = if let Some(manager) = upstream {
+        // Resolve host to SocketAddr
+        if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await {
+            if let Some(addr) = addrs.find(|a| a.is_ipv4()) {
+                match manager.connect(addr, None, None).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(sni = %sni, error = %e, "Upstream connect failed, using direct connect");
+                        timeout(connect_timeout, TcpStream::connect((host, port))).await??
+                    }
+                }
+            } else {
+                timeout(connect_timeout, TcpStream::connect((host, port))).await??
+            }
+        } else {
+            timeout(connect_timeout, TcpStream::connect((host, port))).await??
+        }
+    } else {
+        timeout(connect_timeout, TcpStream::connect((host, port))).await??
+    };
 
     let config = build_client_config();
     let connector = TlsConnector::from(config);
@@ -362,6 +431,7 @@ pub async fn fetch_real_tls(
         .unwrap_or_default();
 
     let total_cert_len: usize = certs.iter().map(|c| c.len()).sum::<usize>().max(1024);
+    let cert_info = parse_cert_info(&certs);
 
     // Heuristic: split across two records if large to mimic real servers a bit.
     let app_data_records_sizes = if total_cert_len > 3000 {
@@ -390,5 +460,6 @@ pub async fn fetch_real_tls(
         server_hello_parsed: parsed,
         app_data_records_sizes: app_data_records_sizes.clone(),
         total_app_data_len: app_data_records_sizes.iter().sum(),
+        cert_info,
     })
 }
