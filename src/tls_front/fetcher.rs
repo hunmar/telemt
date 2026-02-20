@@ -15,7 +15,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError};
 
 use crate::crypto::SecureRandom;
-use crate::protocol::constants::{TLS_RECORD_APPLICATION, TLS_RECORD_HANDSHAKE, TLS_VERSION};
+use crate::protocol::constants::{TLS_RECORD_APPLICATION, TLS_RECORD_HANDSHAKE};
 use crate::tls_front::types::{ParsedServerHello, TlsExtension, TlsFetchResult};
 
 /// No-op verifier: accept any certificate (we only need lengths and metadata).
@@ -163,12 +163,15 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     exts.extend_from_slice(alpn_proto);
 
     // padding to reduce recognizability and keep length ~500 bytes
-    if exts.len() < 180 {
-        let pad_len = 180 - exts.len();
-        exts.extend_from_slice(&0x0015u16.to_be_bytes()); // padding extension
-        exts.extend_from_slice(&(pad_len as u16 + 2).to_be_bytes());
-        exts.extend_from_slice(&(pad_len as u16).to_be_bytes());
-        exts.resize(exts.len() + pad_len, 0);
+    const TARGET_EXT_LEN: usize = 180;
+    if exts.len() < TARGET_EXT_LEN {
+        let remaining = TARGET_EXT_LEN - exts.len();
+        if remaining > 4 {
+            let pad_len = remaining - 4; // minus type+len
+            exts.extend_from_slice(&0x0015u16.to_be_bytes()); // padding extension
+            exts.extend_from_slice(&(pad_len as u16).to_be_bytes());
+            exts.resize(exts.len() + pad_len, 0);
+        }
     }
 
     // Extensions length prefix

@@ -194,6 +194,10 @@ impl ProxyConfig {
 
         validate_network_cfg(&mut config.network)?;
 
+        if config.general.use_middle_proxy && config.network.ipv6 == Some(true) {
+            warn!("IPv6 with Middle Proxy is experimental and may cause KDF address mismatch; consider disabling IPv6 or ME");
+        }
+
         // Random fake_cert_len only when default is in use.
         if !config.censorship.tls_emulation && config.censorship.fake_cert_len == default_fake_cert_len() {
             config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);

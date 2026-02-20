@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use rand::Rng;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::Semaphore;
@@ -275,21 +276,42 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             &config.censorship.tls_front_dir,
         ));
 
+        let port = config.censorship.mask_port;
+        // Initial synchronous fetch to warm cache before serving clients.
+        for domain in tls_domains.clone() {
+            match crate::tls_front::fetcher::fetch_real_tls(
+                &domain,
+                port,
+                &domain,
+                Duration::from_secs(5),
+            )
+            .await
+            {
+                Ok(res) => cache.update_from_fetch(&domain, res).await,
+                Err(e) => warn!(domain = %domain, error = %e, "TLS emulation fetch failed"),
+            }
+        }
+
+        // Periodic refresh with jitter.
         let cache_clone = cache.clone();
         let domains = tls_domains.clone();
-        let port = config.censorship.mask_port;
         tokio::spawn(async move {
-            for domain in domains {
-                match crate::tls_front::fetcher::fetch_real_tls(
-                    &domain,
-                    port,
-                    &domain,
-                    Duration::from_secs(5),
-                )
-                .await
-                {
-                    Ok(res) => cache_clone.update_from_fetch(&domain, res).await,
-                    Err(e) => warn!(domain = %domain, error = %e, "TLS emulation fetch failed"),
+            loop {
+                let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
+                let jitter_secs = rand::rng().random_range(0..=7200);
+                tokio::time::sleep(Duration::from_secs(base_secs + jitter_secs)).await;
+                for domain in &domains {
+                    match crate::tls_front::fetcher::fetch_real_tls(
+                        domain,
+                        port,
+                        domain,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    {
+                        Ok(res) => cache_clone.update_from_fetch(domain, res).await,
+                        Err(e) => warn!(domain = %domain, error = %e, "TLS emulation refresh failed"),
+                    }
                 }
             }
         });

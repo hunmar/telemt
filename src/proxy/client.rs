@@ -31,6 +31,7 @@ use crate::stats::{ReplayChecker, Stats};
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::middle_proxy::MePool;
 use crate::transport::{UpstreamManager, configure_client_socket, parse_proxy_protocol};
+use crate::transport::socket::normalize_ip;
 use crate::tls_front::TlsFrontCache;
 
 use crate::proxy::direct_relay::handle_via_direct;
@@ -55,7 +56,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     stats.increment_connects_all();
-    let mut real_peer = peer;
+    let mut real_peer = normalize_ip(peer);
 
     if config.server.proxy_protocol {
         match parse_proxy_protocol(&mut stream, peer).await {
@@ -66,7 +67,7 @@ where
                     version = info.version,
                     "PROXY protocol header parsed"
                 );
-                real_peer = info.src_addr;
+                real_peer = normalize_ip(info.src_addr);
             }
             Err(e) => {
                 stats.increment_connects_bad();
@@ -264,6 +265,7 @@ impl RunningClientHandler {
     pub async fn run(mut self) -> Result<()> {
         self.stats.increment_connects_all();
 
+        self.peer = normalize_ip(self.peer);
         let peer = self.peer;
         let ip_tracker = self.ip_tracker.clone();
         debug!(peer = %peer, "New connection");
@@ -310,7 +312,7 @@ impl RunningClientHandler {
                         version = info.version,
                         "PROXY protocol header parsed"
                     );
-                    self.peer = info.src_addr;
+                    self.peer = normalize_ip(info.src_addr);
                 }
                 Err(e) => {
                     self.stats.increment_connects_bad();
