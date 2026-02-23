@@ -11,6 +11,8 @@
 //! | `general` | `middle_proxy_pool_size`      | Passed on next connection         |
 //! | `general` | `me_keepalive_*`              | Passed on next connection         |
 //! | `general` | `desync_all_full`             | Applied immediately               |
+//! | `general` | `update_every`                | Applied to ME updater immediately |
+//! | `general` | `me_reinit_drain_timeout_secs`| Applied on next ME map update     |
 //! | `access`  | All user/quota fields         | Effective immediately             |
 //!
 //! Fields that require re-binding sockets (`server.port`, `censorship.*`,
@@ -36,6 +38,8 @@ pub struct HotFields {
     pub ad_tag:                  Option<String>,
     pub middle_proxy_pool_size:  usize,
     pub desync_all_full:         bool,
+    pub update_every_secs:       u64,
+    pub me_reinit_drain_timeout_secs: u64,
     pub me_keepalive_enabled:    bool,
     pub me_keepalive_interval_secs: u64,
     pub me_keepalive_jitter_secs:   u64,
@@ -50,6 +54,8 @@ impl HotFields {
             ad_tag:                  cfg.general.ad_tag.clone(),
             middle_proxy_pool_size:  cfg.general.middle_proxy_pool_size,
             desync_all_full:         cfg.general.desync_all_full,
+            update_every_secs:       cfg.general.effective_update_every_secs(),
+            me_reinit_drain_timeout_secs: cfg.general.me_reinit_drain_timeout_secs,
             me_keepalive_enabled:    cfg.general.me_keepalive_enabled,
             me_keepalive_interval_secs: cfg.general.me_keepalive_interval_secs,
             me_keepalive_jitter_secs:   cfg.general.me_keepalive_jitter_secs,
@@ -182,6 +188,20 @@ fn log_changes(
         info!(
             "config reload: desync_all_full: {} → {}",
             old_hot.desync_all_full, new_hot.desync_all_full,
+        );
+    }
+
+    if old_hot.update_every_secs != new_hot.update_every_secs {
+        info!(
+            "config reload: update_every(effective): {}s → {}s",
+            old_hot.update_every_secs, new_hot.update_every_secs,
+        );
+    }
+
+    if old_hot.me_reinit_drain_timeout_secs != new_hot.me_reinit_drain_timeout_secs {
+        info!(
+            "config reload: me_reinit_drain_timeout_secs: {}s → {}s",
+            old_hot.me_reinit_drain_timeout_secs, new_hot.me_reinit_drain_timeout_secs,
         );
     }
 

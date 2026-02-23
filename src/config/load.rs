@@ -117,6 +117,34 @@ impl ProxyConfig {
         let mut config: ProxyConfig =
             toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
 
+        if let Some(update_every) = config.general.update_every {
+            if update_every == 0 {
+                return Err(ProxyError::Config(
+                    "general.update_every must be > 0".to_string(),
+                ));
+            }
+        } else {
+            let legacy_secret = config.general.proxy_secret_auto_reload_secs;
+            let legacy_config = config.general.proxy_config_auto_reload_secs;
+            let effective = legacy_secret.min(legacy_config);
+            if effective == 0 {
+                return Err(ProxyError::Config(
+                    "legacy proxy_*_auto_reload_secs values must be > 0 when general.update_every is not set".to_string(),
+                ));
+            }
+
+            if legacy_secret != default_proxy_secret_reload_secs()
+                || legacy_config != default_proxy_config_reload_secs()
+            {
+                warn!(
+                    proxy_secret_auto_reload_secs = legacy_secret,
+                    proxy_config_auto_reload_secs = legacy_config,
+                    effective_update_every_secs = effective,
+                    "proxy_*_auto_reload_secs are deprecated; set general.update_every"
+                );
+            }
+        }
+
         // Validate secrets.
         for (user, secret) in &config.access.users {
             if !secret.chars().all(|c| c.is_ascii_hexdigit()) || secret.len() != 32 {

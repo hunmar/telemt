@@ -171,6 +171,14 @@ pub(crate) fn default_proxy_config_reload_secs() -> u64 {
     12 * 60 * 60
 }
 
+pub(crate) fn default_update_every_secs() -> u64 {
+    12 * 60 * 60
+}
+
+pub(crate) fn default_me_reinit_drain_timeout_secs() -> u64 {
+    300
+}
+
 pub(crate) fn default_ntp_check() -> bool {
     true
 }
