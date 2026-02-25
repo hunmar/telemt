@@ -623,7 +623,7 @@ impl Default for AntiCensorshipConfig {
             mask_port: default_mask_port(),
             mask_unix_sock: None,
             fake_cert_len: default_fake_cert_len(),
-            tls_emulation: false,
+            tls_emulation: true,
             tls_front_dir: default_tls_front_dir(),
             server_hello_delay_min_ms: default_server_hello_delay_min_ms(),
             server_hello_delay_max_ms: default_server_hello_delay_max_ms(),
