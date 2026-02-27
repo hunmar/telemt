@@ -285,17 +285,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .mask_host
             .clone()
             .unwrap_or_else(|| config.censorship.tls_domain.clone());
+        let mask_unix_sock = config.censorship.mask_unix_sock.clone();
         let fetch_timeout = Duration::from_secs(5);
 
         let cache_initial = cache.clone();
         let domains_initial = tls_domains.clone();
         let host_initial = mask_host.clone();
+        let unix_sock_initial = mask_unix_sock.clone();
         let upstream_initial = upstream_manager.clone();
         tokio::spawn(async move {
             let mut join = tokio::task::JoinSet::new();
             for domain in domains_initial {
                 let cache_domain = cache_initial.clone();
                 let host_domain = host_initial.clone();
+                let unix_sock_domain = unix_sock_initial.clone();
                 let upstream_domain = upstream_initial.clone();
                 join.spawn(async move {
                     match crate::tls_front::fetcher::fetch_real_tls(
@@ -305,6 +308,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         fetch_timeout,
                         Some(upstream_domain),
                         proxy_protocol,
+                        unix_sock_domain.as_deref(),
                     )
                     .await
                     {
@@ -344,6 +348,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let cache_refresh = cache.clone();
         let domains_refresh = tls_domains.clone();
         let host_refresh = mask_host.clone();
+        let unix_sock_refresh = mask_unix_sock.clone();
         let upstream_refresh = upstream_manager.clone();
         tokio::spawn(async move {
             loop {
@@ -355,6 +360,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 for domain in domains_refresh.clone() {
                     let cache_domain = cache_refresh.clone();
                     let host_domain = host_refresh.clone();
+                    let unix_sock_domain = unix_sock_refresh.clone();
                     let upstream_domain = upstream_refresh.clone();
                     join.spawn(async move {
                         match crate::tls_front::fetcher::fetch_real_tls(
@@ -364,6 +370,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                             fetch_timeout,
                             Some(upstream_domain),
                             proxy_protocol,
+                            unix_sock_domain.as_deref(),
                         )
                         .await
                         {
