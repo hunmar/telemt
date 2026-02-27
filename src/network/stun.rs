@@ -7,6 +7,7 @@ use tokio::net::{lookup_host, UdpSocket};
 use tokio::time::{timeout, Duration, sleep};
 
 use crate::error::{ProxyError, Result};
+use crate::network::dns_overrides::{resolve, split_host_port};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IpFamily {
@@ -192,6 +193,16 @@ pub async fn stun_probe_family(stun_addr: &str, family: IpFamily) -> Result<Opti
 
 async fn resolve_stun_addr(stun_addr: &str, family: IpFamily) -> Result<Option<SocketAddr>> {
     if let Ok(addr) = stun_addr.parse::<SocketAddr>() {
+        return Ok(match (addr.is_ipv4(), family) {
+            (true, IpFamily::V4) | (false, IpFamily::V6) => Some(addr),
+            _ => None,
+        });
+    }
+
+    if let Some((host, port)) = split_host_port(stun_addr)
+        && let Some(ip) = resolve(&host, port)
+    {
+        let addr = SocketAddr::new(ip, port);
         return Ok(match (addr.is_ipv4(), family) {
             (true, IpFamily::V4) | (false, IpFamily::V6) => Some(addr),
             _ => None,

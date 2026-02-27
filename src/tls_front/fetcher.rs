@@ -18,6 +18,7 @@ use x509_parser::prelude::FromDer;
 use x509_parser::certificate::X509Certificate;
 
 use crate::crypto::SecureRandom;
+use crate::network::dns_overrides::resolve_socket_addr;
 use crate::protocol::constants::{TLS_RECORD_APPLICATION, TLS_RECORD_HANDSHAKE};
 use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 use crate::tls_front::types::{
@@ -333,6 +334,17 @@ fn u24_bytes(value: usize) -> Option<[u8; 3]> {
     ])
 }
 
+async fn connect_with_dns_override(
+    host: &str,
+    port: u16,
+    connect_timeout: Duration,
+) -> Result<TcpStream> {
+    if let Some(addr) = resolve_socket_addr(host, port) {
+        return Ok(timeout(connect_timeout, TcpStream::connect(addr)).await??);
+    }
+    Ok(timeout(connect_timeout, TcpStream::connect((host, port))).await??)
+}
+
 fn encode_tls13_certificate_message(cert_chain_der: &[Vec<u8>]) -> Option<Vec<u8>> {
     if cert_chain_der.is_empty() {
         return None;
@@ -369,8 +381,7 @@ async fn fetch_via_raw_tls(
     connect_timeout: Duration,
     proxy_protocol: u8,
 ) -> Result<TlsFetchResult> {
-    let addr = format!("{host}:{port}");
-    let mut stream = timeout(connect_timeout, TcpStream::connect(addr)).await??;
+    let mut stream = connect_with_dns_override(host, port, connect_timeout).await?;
 
     let rng = SecureRandom::new();
     let client_hello = build_client_hello(sni, &rng);
@@ -437,24 +448,31 @@ async fn fetch_via_rustls(
 ) -> Result<TlsFetchResult> {
     // rustls handshake path for certificate and basic negotiated metadata.
     let mut stream = if let Some(manager) = upstream {
-        // Resolve host to SocketAddr
-        if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await {
+        if let Some(addr) = resolve_socket_addr(host, port) {
+            match manager.connect(addr, None, None).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(sni = %sni, error = %e, "Upstream connect failed, using direct connect");
+                    connect_with_dns_override(host, port, connect_timeout).await?
+                }
+            }
+        } else if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await {
             if let Some(addr) = addrs.find(|a| a.is_ipv4()) {
                 match manager.connect(addr, None, None).await {
                     Ok(s) => s,
                     Err(e) => {
                         warn!(sni = %sni, error = %e, "Upstream connect failed, using direct connect");
-                        timeout(connect_timeout, TcpStream::connect((host, port))).await??
+                        connect_with_dns_override(host, port, connect_timeout).await?
                     }
                 }
             } else {
-                timeout(connect_timeout, TcpStream::connect((host, port))).await??
+                connect_with_dns_override(host, port, connect_timeout).await?
             }
         } else {
-            timeout(connect_timeout, TcpStream::connect((host, port))).await??
+            connect_with_dns_override(host, port, connect_timeout).await?
         }
     } else {
-        timeout(connect_timeout, TcpStream::connect((host, port))).await??
+        connect_with_dns_override(host, port, connect_timeout).await?
     };
 
     if proxy_protocol > 0 {

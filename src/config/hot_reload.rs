@@ -16,6 +16,7 @@
 //! | `general` | `me_pool_drain_ttl_secs`      | Applied on next ME map update     |
 //! | `general` | `me_pool_min_fresh_ratio`     | Applied on next ME map update     |
 //! | `general` | `me_reinit_drain_timeout_secs`| Applied on next ME map update     |
+//! | `network` | `dns_overrides`               | Applied immediately               |
 //! | `access`  | All user/quota fields         | Effective immediately             |
 //!
 //! Fields that require re-binding sockets (`server.port`, `censorship.*`,
@@ -39,6 +40,7 @@ use super::load::ProxyConfig;
 pub struct HotFields {
     pub log_level:               LogLevel,
     pub ad_tag:                  Option<String>,
+    pub dns_overrides:           Vec<String>,
     pub middle_proxy_pool_size:  usize,
     pub desync_all_full:         bool,
     pub update_every_secs:       u64,
@@ -58,6 +60,7 @@ impl HotFields {
         Self {
             log_level:               cfg.general.log_level.clone(),
             ad_tag:                  cfg.general.ad_tag.clone(),
+            dns_overrides:           cfg.network.dns_overrides.clone(),
             middle_proxy_pool_size:  cfg.general.middle_proxy_pool_size,
             desync_all_full:         cfg.general.desync_all_full,
             update_every_secs:       cfg.general.effective_update_every_secs(),
@@ -186,6 +189,13 @@ fn log_changes(
             "config reload: ad_tag: {} → {}",
             old_hot.ad_tag.as_deref().unwrap_or("none"),
             new_hot.ad_tag.as_deref().unwrap_or("none"),
+        );
+    }
+
+    if old_hot.dns_overrides != new_hot.dns_overrides {
+        info!(
+            "config reload: network.dns_overrides updated ({} entries)",
+            new_hot.dns_overrides.len()
         );
     }
 
@@ -351,6 +361,16 @@ fn reload_config(
     let new_hot = HotFields::from_config(&new_cfg);
 
     if old_hot == new_hot {
+        return;
+    }
+
+    if old_hot.dns_overrides != new_hot.dns_overrides
+        && let Err(e) = crate::network::dns_overrides::install_entries(&new_hot.dns_overrides)
+    {
+        error!(
+            "config reload: invalid network.dns_overrides: {}; keeping old config",
+            e
+        );
         return;
     }
 

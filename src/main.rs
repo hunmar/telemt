@@ -193,6 +193,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    if let Err(e) = crate::network::dns_overrides::install_entries(&config.network.dns_overrides) {
+        eprintln!("[telemt] Invalid network.dns_overrides: {}", e);
+        std::process::exit(1);
+    }
+
     let has_rust_log = std::env::var("RUST_LOG").is_ok();
     let effective_log_level = if cli_silent {
         LogLevel::Silent
@@ -403,6 +408,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if !config.access.user_max_unique_ips.is_empty() {
         info!("IP limits configured for {} users", config.access.user_max_unique_ips.len());
     }
+    if !config.network.dns_overrides.is_empty() {
+        info!(
+            "Runtime DNS overrides configured: {} entries",
+            config.network.dns_overrides.len()
+        );
+    }
 
     // Connection concurrency limit
     let max_connections = Arc::new(Semaphore::new(10_000));
@@ -417,14 +428,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // =====================================================================
     let me_pool: Option<Arc<MePool>> = if use_middle_proxy {
         info!("=== Middle Proxy Mode ===");
+        let me_nat_probe = config.general.middle_proxy_nat_probe && config.network.stun_use;
+        if config.general.middle_proxy_nat_probe && !config.network.stun_use {
+            info!("Middle-proxy STUN probing disabled by network.stun_use=false");
+        }
 
         // ad_tag (proxy_tag) for advertising
-        let proxy_tag = config.general.ad_tag.as_ref().map(|tag| {
-            hex::decode(tag).unwrap_or_else(|_| {
-                warn!("Invalid ad_tag hex, middle proxy ad_tag will be empty");
-                Vec::new()
-            })
-        });
+        let proxy_tag = config
+            .general
+            .ad_tag
+            .as_ref()
+            .map(|tag| hex::decode(tag).expect("general.ad_tag must be validated before startup"));
 
         // =============================================================
         // CRITICAL: Download Telegram proxy-secret (NOT user secret!)
@@ -484,7 +498,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     proxy_tag,
                     proxy_secret,
                     config.general.middle_proxy_nat_ip,
-                    config.general.middle_proxy_nat_probe,
+                    me_nat_probe,
                     None,
                     config.network.stun_servers.clone(),
                     config.general.stun_nat_probe_concurrency,
@@ -1037,9 +1051,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let stats = stats.clone();
         let beobachten = beobachten.clone();
         let config_rx_metrics = config_rx.clone();
+        let ip_tracker_metrics = ip_tracker.clone();
         let whitelist = config.server.metrics_whitelist.clone();
         tokio::spawn(async move {
-            metrics::serve(port, stats, beobachten, config_rx_metrics, whitelist).await;
+            metrics::serve(
+                port,
+                stats,
+                beobachten,
+                ip_tracker_metrics,
+                config_rx_metrics,
+                whitelist,
+            )
+            .await;
         });
     }
 

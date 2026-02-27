@@ -75,6 +75,23 @@ fn push_unique_nonempty(target: &mut Vec<String>, value: String) {
     }
 }
 
+fn is_valid_ad_tag(tag: &str) -> bool {
+    tag.len() == 32 && tag.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn sanitize_ad_tag(ad_tag: &mut Option<String>) {
+    let Some(tag) = ad_tag.as_ref() else {
+        return;
+    };
+
+    if !is_valid_ad_tag(tag) {
+        warn!(
+            "Invalid general.ad_tag value, expected exactly 32 hex chars; ad_tag is disabled"
+        );
+        *ad_tag = None;
+    }
+}
+
 // ============= Main Config =============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -183,6 +200,8 @@ impl ProxyConfig {
                 warn!("general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are deprecated; use network.stun_servers");
             }
         }
+
+        sanitize_ad_tag(&mut config.general.ad_tag);
 
         if let Some(update_every) = config.general.update_every {
             if update_every == 0 {
@@ -380,6 +399,7 @@ impl ProxyConfig {
         }
 
         validate_network_cfg(&mut config.network)?;
+        crate::network::dns_overrides::validate_entries(&config.network.dns_overrides)?;
 
         if config.general.use_middle_proxy && config.network.ipv6 == Some(true) {
             warn!("IPv6 with Middle Proxy is experimental and may cause KDF address mismatch; consider disabling IPv6 or ME");
@@ -482,13 +502,17 @@ impl ProxyConfig {
 
         if let Some(tag) = &self.general.ad_tag {
             let zeros = "00000000000000000000000000000000";
+            if !is_valid_ad_tag(tag) {
+                return Err(ProxyError::Config(
+                    "general.ad_tag must be exactly 32 hex characters".to_string(),
+                ));
+            }
             if tag == zeros {
                 warn!("ad_tag is all zeros; register a valid proxy tag via @MTProxybot to enable sponsored channel");
             }
-            if tag.len() != 32 || tag.chars().any(|c| !c.is_ascii_hexdigit()) {
-                warn!("ad_tag is not a 32-char hex string; ensure you use value issued by @MTProxybot");
-            }
         }
+
+        crate::network::dns_overrides::validate_entries(&self.network.dns_overrides)?;
 
         Ok(())
     }
@@ -509,6 +533,7 @@ mod tests {
         let cfg: ProxyConfig = toml::from_str(toml).unwrap();
 
         assert_eq!(cfg.network.ipv6, default_network_ipv6());
+        assert_eq!(cfg.network.stun_use, default_true());
         assert_eq!(cfg.network.stun_tcp_fallback, default_stun_tcp_fallback());
         assert_eq!(
             cfg.general.middle_proxy_warm_standby,
@@ -532,6 +557,7 @@ mod tests {
     fn impl_defaults_are_sourced_from_default_helpers() {
         let network = NetworkConfig::default();
         assert_eq!(network.ipv6, default_network_ipv6());
+        assert_eq!(network.stun_use, default_true());
         assert_eq!(network.stun_tcp_fallback, default_stun_tcp_fallback());
 
         let general = GeneralConfig::default();
@@ -932,6 +958,89 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let cfg = ProxyConfig::load(&path).unwrap();
         assert_eq!(cfg.general.me_reinit_drain_timeout_secs, 90);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_ad_tag_is_disabled_during_load() {
+        let toml = r#"
+            [general]
+            ad_tag = "not_hex"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_invalid_ad_tag_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert!(cfg.general.ad_tag.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn valid_ad_tag_is_preserved_during_load() {
+        let toml = r#"
+            [general]
+            ad_tag = "00112233445566778899aabbccddeeff"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_valid_ad_tag_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(
+            cfg.general.ad_tag.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_dns_override_is_rejected() {
+        let toml = r#"
+            [network]
+            dns_overrides = ["example.com:443:2001:db8::10"]
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_invalid_dns_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("must be bracketed"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn valid_dns_override_is_accepted() {
+        let toml = r#"
+            [network]
+            dns_overrides = ["example.com:443:127.0.0.1", "example.net:443:[2001:db8::10]"]
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_valid_dns_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.network.dns_overrides.len(), 2);
         let _ = std::fs::remove_file(path);
     }
 }

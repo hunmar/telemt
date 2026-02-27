@@ -17,6 +17,7 @@ use tracing::{debug, warn, info, trace};
 
 use crate::config::{UpstreamConfig, UpstreamType};
 use crate::error::{Result, ProxyError};
+use crate::network::dns_overrides::{resolve_socket_addr, split_host_port};
 use crate::protocol::constants::{TG_DATACENTERS_V4, TG_DATACENTERS_V6, TG_DATACENTER_PORT};
 use crate::transport::socket::{create_outgoing_socket_bound, resolve_interface_ip};
 use crate::transport::socks::{connect_socks4, connect_socks5};
@@ -207,6 +208,31 @@ impl UpstreamManager {
         }
 
         None
+    }
+
+    async fn connect_hostname_with_dns_override(
+        address: &str,
+        connect_timeout: Duration,
+    ) -> Result<TcpStream> {
+        if let Some((host, port)) = split_host_port(address)
+            && let Some(addr) = resolve_socket_addr(&host, port)
+        {
+            return match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => Ok(stream),
+                Ok(Err(e)) => Err(ProxyError::Io(e)),
+                Err(_) => Err(ProxyError::ConnectionTimeout {
+                    addr: addr.to_string(),
+                }),
+            };
+        }
+
+        match tokio::time::timeout(connect_timeout, TcpStream::connect(address)).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(e)) => Err(ProxyError::Io(e)),
+            Err(_) => Err(ProxyError::ConnectionTimeout {
+                addr: address.to_string(),
+            }),
+        }
     }
 
     /// Select upstream using latency-weighted random selection.
@@ -433,15 +459,7 @@ impl UpstreamManager {
                     if interface.is_some() {
                         warn!("SOCKS4 interface binding is not supported for hostname addresses, ignoring");
                     }
-                    match tokio::time::timeout(connect_timeout, TcpStream::connect(address)).await {
-                        Ok(Ok(stream)) => stream,
-                        Ok(Err(e)) => return Err(ProxyError::Io(e)),
-                        Err(_) => {
-                            return Err(ProxyError::ConnectionTimeout {
-                                addr: address.clone(),
-                            });
-                        }
-                    }
+                    Self::connect_hostname_with_dns_override(address, connect_timeout).await?
                 };
 
                 // replace socks user_id with config.selected_scope, if set
@@ -503,15 +521,7 @@ impl UpstreamManager {
                     if interface.is_some() {
                         warn!("SOCKS5 interface binding is not supported for hostname addresses, ignoring");
                     }
-                    match tokio::time::timeout(connect_timeout, TcpStream::connect(address)).await {
-                        Ok(Ok(stream)) => stream,
-                        Ok(Err(e)) => return Err(ProxyError::Io(e)),
-                        Err(_) => {
-                            return Err(ProxyError::ConnectionTimeout {
-                                addr: address.clone(),
-                            });
-                        }
-                    }
+                    Self::connect_hostname_with_dns_override(address, connect_timeout).await?
                 };
 
                 debug!(config = ?config, "Socks5 connection");

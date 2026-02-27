@@ -97,6 +97,11 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub multipath: bool,
 
+    /// Global switch for STUN probing.
+    /// When false, STUN is fully disabled and only non-STUN detection remains.
+    #[serde(default = "default_true")]
+    pub stun_use: bool,
+
     /// STUN servers list for public IP discovery.
     #[serde(default = "default_stun_servers")]
     pub stun_servers: Vec<String>,
@@ -112,6 +117,11 @@ pub struct NetworkConfig {
     /// Cache file path for detected public IP.
     #[serde(default = "default_cache_public_ip_path")]
     pub cache_public_ip_path: String,
+
+    /// Runtime DNS overrides in `host:port:ip` format.
+    /// IPv6 IP values must be bracketed: `[2001:db8::1]`.
+    #[serde(default)]
+    pub dns_overrides: Vec<String>,
 }
 
 impl Default for NetworkConfig {
@@ -121,10 +131,12 @@ impl Default for NetworkConfig {
             ipv6: default_network_ipv6(),
             prefer: default_prefer_4(),
             multipath: false,
+            stun_use: default_true(),
             stun_servers: default_stun_servers(),
             stun_tcp_fallback: default_stun_tcp_fallback(),
             http_ip_detect_urls: default_http_ip_detect_urls(),
             cache_public_ip_path: default_cache_public_ip_path(),
+            dns_overrides: Vec::new(),
         }
     }
 }

@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn, debug};
 
 use crate::config::ProxyConfig;
+use crate::ip_tracker::UserIpTracker;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::Stats;
 
@@ -20,6 +22,7 @@ pub async fn serve(
     port: u16,
     stats: Arc<Stats>,
     beobachten: Arc<BeobachtenStore>,
+    ip_tracker: Arc<UserIpTracker>,
     config_rx: tokio::sync::watch::Receiver<Arc<ProxyConfig>>,
     whitelist: Vec<IpNetwork>,
 ) {
@@ -49,13 +52,15 @@ pub async fn serve(
 
         let stats = stats.clone();
         let beobachten = beobachten.clone();
+        let ip_tracker = ip_tracker.clone();
         let config_rx_conn = config_rx.clone();
         tokio::spawn(async move {
             let svc = service_fn(move |req| {
                 let stats = stats.clone();
                 let beobachten = beobachten.clone();
+                let ip_tracker = ip_tracker.clone();
                 let config = config_rx_conn.borrow().clone();
-                async move { handle(req, &stats, &beobachten, &config) }
+                async move { handle(req, &stats, &beobachten, &ip_tracker, &config).await }
             });
             if let Err(e) = http1::Builder::new()
                 .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
@@ -67,14 +72,15 @@ pub async fn serve(
     }
 }
 
-fn handle<B>(
+async fn handle<B>(
     req: Request<B>,
     stats: &Stats,
     beobachten: &BeobachtenStore,
+    ip_tracker: &UserIpTracker,
     config: &ProxyConfig,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.uri().path() == "/metrics" {
-        let body = render_metrics(stats);
+        let body = render_metrics(stats, config, ip_tracker).await;
         let resp = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
@@ -109,7 +115,7 @@ fn render_beobachten(beobachten: &BeobachtenStore, config: &ProxyConfig) -> Stri
     beobachten.snapshot_text(ttl)
 }
 
-fn render_metrics(stats: &Stats) -> String {
+async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIpTracker) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(4096);
 
@@ -349,6 +355,41 @@ fn render_metrics(stats: &Stats) -> String {
         let _ = writeln!(out, "telemt_user_msgs_to_client{{user=\"{}\"}} {}", user, s.msgs_to_client.load(std::sync::atomic::Ordering::Relaxed));
     }
 
+    let ip_stats = ip_tracker.get_stats().await;
+    let ip_counts: HashMap<String, usize> = ip_stats
+        .into_iter()
+        .map(|(user, count, _)| (user, count))
+        .collect();
+
+    let mut unique_users = BTreeSet::new();
+    unique_users.extend(config.access.user_max_unique_ips.keys().cloned());
+    unique_users.extend(ip_counts.keys().cloned());
+
+    let _ = writeln!(out, "# HELP telemt_user_unique_ips_current Per-user current number of unique active IPs");
+    let _ = writeln!(out, "# TYPE telemt_user_unique_ips_current gauge");
+    let _ = writeln!(out, "# HELP telemt_user_unique_ips_limit Per-user configured unique IP limit (0 means unlimited)");
+    let _ = writeln!(out, "# TYPE telemt_user_unique_ips_limit gauge");
+    let _ = writeln!(out, "# HELP telemt_user_unique_ips_utilization Per-user unique IP usage ratio (0 for unlimited)");
+    let _ = writeln!(out, "# TYPE telemt_user_unique_ips_utilization gauge");
+
+    for user in unique_users {
+        let current = ip_counts.get(&user).copied().unwrap_or(0);
+        let limit = config.access.user_max_unique_ips.get(&user).copied().unwrap_or(0);
+        let utilization = if limit > 0 {
+            current as f64 / limit as f64
+        } else {
+            0.0
+        };
+        let _ = writeln!(out, "telemt_user_unique_ips_current{{user=\"{}\"}} {}", user, current);
+        let _ = writeln!(out, "telemt_user_unique_ips_limit{{user=\"{}\"}} {}", user, limit);
+        let _ = writeln!(
+            out,
+            "telemt_user_unique_ips_utilization{{user=\"{}\"}} {:.6}",
+            user,
+            utilization
+        );
+    }
+
     out
 }
 
@@ -358,9 +399,16 @@ mod tests {
     use std::net::IpAddr;
     use http_body_util::BodyExt;
 
-    #[test]
-    fn test_render_metrics_format() {
+    #[tokio::test]
+    async fn test_render_metrics_format() {
         let stats = Arc::new(Stats::new());
+        let tracker = UserIpTracker::new();
+        let mut config = ProxyConfig::default();
+        config
+            .access
+            .user_max_unique_ips
+            .insert("alice".to_string(), 4);
+
         stats.increment_connects_all();
         stats.increment_connects_all();
         stats.increment_connects_bad();
@@ -372,8 +420,12 @@ mod tests {
         stats.increment_user_msgs_from("alice");
         stats.increment_user_msgs_to("alice");
         stats.increment_user_msgs_to("alice");
+        tracker
+            .check_and_add("alice", "203.0.113.10".parse().unwrap())
+            .await
+            .unwrap();
 
-        let output = render_metrics(&stats);
+        let output = render_metrics(&stats, &config, &tracker).await;
 
         assert!(output.contains("telemt_connections_total 2"));
         assert!(output.contains("telemt_connections_bad_total 1"));
@@ -384,22 +436,29 @@ mod tests {
         assert!(output.contains("telemt_user_octets_to_client{user=\"alice\"} 2048"));
         assert!(output.contains("telemt_user_msgs_from_client{user=\"alice\"} 1"));
         assert!(output.contains("telemt_user_msgs_to_client{user=\"alice\"} 2"));
+        assert!(output.contains("telemt_user_unique_ips_current{user=\"alice\"} 1"));
+        assert!(output.contains("telemt_user_unique_ips_limit{user=\"alice\"} 4"));
+        assert!(output.contains("telemt_user_unique_ips_utilization{user=\"alice\"} 0.250000"));
     }
 
-    #[test]
-    fn test_render_empty_stats() {
+    #[tokio::test]
+    async fn test_render_empty_stats() {
         let stats = Stats::new();
-        let output = render_metrics(&stats);
+        let tracker = UserIpTracker::new();
+        let config = ProxyConfig::default();
+        let output = render_metrics(&stats, &config, &tracker).await;
         assert!(output.contains("telemt_connections_total 0"));
         assert!(output.contains("telemt_connections_bad_total 0"));
         assert!(output.contains("telemt_handshake_timeouts_total 0"));
         assert!(!output.contains("user="));
     }
 
-    #[test]
-    fn test_render_has_type_annotations() {
+    #[tokio::test]
+    async fn test_render_has_type_annotations() {
         let stats = Stats::new();
-        let output = render_metrics(&stats);
+        let tracker = UserIpTracker::new();
+        let config = ProxyConfig::default();
+        let output = render_metrics(&stats, &config, &tracker).await;
         assert!(output.contains("# TYPE telemt_uptime_seconds gauge"));
         assert!(output.contains("# TYPE telemt_connections_total counter"));
         assert!(output.contains("# TYPE telemt_connections_bad_total counter"));
@@ -408,12 +467,16 @@ mod tests {
         assert!(output.contains(
             "# TYPE telemt_me_writer_removed_unexpected_minus_restored_total gauge"
         ));
+        assert!(output.contains("# TYPE telemt_user_unique_ips_current gauge"));
+        assert!(output.contains("# TYPE telemt_user_unique_ips_limit gauge"));
+        assert!(output.contains("# TYPE telemt_user_unique_ips_utilization gauge"));
     }
 
     #[tokio::test]
     async fn test_endpoint_integration() {
         let stats = Arc::new(Stats::new());
         let beobachten = Arc::new(BeobachtenStore::new());
+        let tracker = UserIpTracker::new();
         let mut config = ProxyConfig::default();
         stats.increment_connects_all();
         stats.increment_connects_all();
@@ -423,7 +486,7 @@ mod tests {
             .uri("/metrics")
             .body(())
             .unwrap();
-        let resp = handle(req, &stats, &beobachten, &config).unwrap();
+        let resp = handle(req, &stats, &beobachten, &tracker, &config).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(std::str::from_utf8(body.as_ref()).unwrap().contains("telemt_connections_total 3"));
@@ -439,7 +502,9 @@ mod tests {
             .uri("/beobachten")
             .body(())
             .unwrap();
-        let resp_beob = handle(req_beob, &stats, &beobachten, &config).unwrap();
+        let resp_beob = handle(req_beob, &stats, &beobachten, &tracker, &config)
+            .await
+            .unwrap();
         assert_eq!(resp_beob.status(), StatusCode::OK);
         let body_beob = resp_beob.into_body().collect().await.unwrap().to_bytes();
         let beob_text = std::str::from_utf8(body_beob.as_ref()).unwrap();
@@ -450,7 +515,9 @@ mod tests {
             .uri("/other")
             .body(())
             .unwrap();
-        let resp404 = handle(req404, &stats, &beobachten, &config).unwrap();
+        let resp404 = handle(req404, &stats, &beobachten, &tracker, &config)
+            .await
+            .unwrap();
         assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
     }
 }
