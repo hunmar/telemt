@@ -122,9 +122,9 @@ pub async fn run_me_ping(pool: &Arc<MePool>, rng: &SecureRandom) -> Vec<MePingRe
             let mut error = None;
 
             match pool.connect_tcp(addr).await {
-                Ok((stream, conn_rtt)) => {
+                Ok((stream, conn_rtt, upstream_egress)) => {
                     connect_ms = Some(conn_rtt);
-                    match pool.handshake_only(stream, addr, rng).await {
+                    match pool.handshake_only(stream, addr, upstream_egress, rng).await {
                         Ok(hs) => {
                             handshake_ms = Some(hs.handshake_ms);
                             // drop halves to close

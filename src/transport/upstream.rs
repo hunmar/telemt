@@ -151,6 +151,21 @@ pub struct StartupPingResult {
     pub both_available: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamRouteKind {
+    Direct,
+    Socks4,
+    Socks5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpstreamEgressInfo {
+    pub route_kind: UpstreamRouteKind,
+    pub local_addr: Option<SocketAddr>,
+    pub direct_bind_ip: Option<IpAddr>,
+    pub socks_bound_addr: Option<SocketAddr>,
+}
+
 // ============= Upstream Manager =============
 
 #[derive(Clone)]
@@ -316,6 +331,17 @@ impl UpstreamManager {
 
     /// Connect to target through a selected upstream.
     pub async fn connect(&self, target: SocketAddr, dc_idx: Option<i16>, scope: Option<&str>) -> Result<TcpStream> {
+        let (stream, _) = self.connect_with_details(target, dc_idx, scope).await?;
+        Ok(stream)
+    }
+
+    /// Connect to target through a selected upstream and return egress details.
+    pub async fn connect_with_details(
+        &self,
+        target: SocketAddr,
+        dc_idx: Option<i16>,
+        scope: Option<&str>,
+    ) -> Result<(TcpStream, UpstreamEgressInfo)> {
         let idx = self.select_upstream(dc_idx, scope).await
             .ok_or_else(|| ProxyError::Config("No upstreams available".to_string()))?;
 
@@ -337,7 +363,7 @@ impl UpstreamManager {
         };
 
         match self.connect_via_upstream(&upstream, target, bind_rr).await {
-            Ok(stream) => {
+            Ok((stream, egress)) => {
                 let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let mut guard = self.upstreams.write().await;
                 if let Some(u) = guard.get_mut(idx) {
@@ -351,7 +377,7 @@ impl UpstreamManager {
                         u.dc_latency[di].update(rtt_ms);
                     }
                 }
-                Ok(stream)
+                Ok((stream, egress))
             },
             Err(e) => {
                 let mut guard = self.upstreams.write().await;
@@ -373,7 +399,7 @@ impl UpstreamManager {
         config: &UpstreamConfig,
         target: SocketAddr,
         bind_rr: Option<Arc<AtomicUsize>>,
-    ) -> Result<TcpStream> {
+    ) -> Result<(TcpStream, UpstreamEgressInfo)> {
         match &config.upstream_type {
             UpstreamType::Direct { interface, bind_addresses } => {
                 let bind_ip = Self::resolve_bind_address(
@@ -414,7 +440,16 @@ impl UpstreamManager {
                     return Err(ProxyError::Io(e));
                 }
 
-                Ok(stream)
+                let local_addr = stream.local_addr().ok();
+                Ok((
+                    stream,
+                    UpstreamEgressInfo {
+                        route_kind: UpstreamRouteKind::Direct,
+                        local_addr,
+                        direct_bind_ip: bind_ip,
+                        socks_bound_addr: None,
+                    },
+                ))
             },
             UpstreamType::Socks4 { address, interface, user_id } => {
                 let connect_timeout = Duration::from_secs(DIRECT_CONNECT_TIMEOUT_SECS);
@@ -467,16 +502,30 @@ impl UpstreamManager {
                     .filter(|s| !s.is_empty());
                 let _user_id: Option<&str> = scope.or(user_id.as_deref());
 
-                match tokio::time::timeout(connect_timeout, connect_socks4(&mut stream, target, _user_id)).await {
-                    Ok(Ok(())) => {}
+                let bound = match tokio::time::timeout(
+                    connect_timeout,
+                    connect_socks4(&mut stream, target, _user_id),
+                )
+                .await
+                {
+                    Ok(Ok(bound)) => bound,
                     Ok(Err(e)) => return Err(e),
                     Err(_) => {
                         return Err(ProxyError::ConnectionTimeout {
                             addr: target.to_string(),
                         });
                     }
-                }
-                Ok(stream)
+                };
+                let local_addr = stream.local_addr().ok();
+                Ok((
+                    stream,
+                    UpstreamEgressInfo {
+                        route_kind: UpstreamRouteKind::Socks4,
+                        local_addr,
+                        direct_bind_ip: None,
+                        socks_bound_addr: Some(bound.addr),
+                    },
+                ))
             },
             UpstreamType::Socks5 { address, interface, username, password } => {
                 let connect_timeout = Duration::from_secs(DIRECT_CONNECT_TIMEOUT_SECS);
@@ -531,21 +580,30 @@ impl UpstreamManager {
                 let _username: Option<&str> = scope.or(username.as_deref());
                 let _password: Option<&str> = scope.or(password.as_deref());
 
-                match tokio::time::timeout(
+                let bound = match tokio::time::timeout(
                     connect_timeout,
                     connect_socks5(&mut stream, target, _username, _password),
                 )
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(bound)) => bound,
                     Ok(Err(e)) => return Err(e),
                     Err(_) => {
                         return Err(ProxyError::ConnectionTimeout {
                             addr: target.to_string(),
                         });
                     }
-                }
-                Ok(stream)
+                };
+                let local_addr = stream.local_addr().ok();
+                Ok((
+                    stream,
+                    UpstreamEgressInfo {
+                        route_kind: UpstreamRouteKind::Socks5,
+                        local_addr,
+                        direct_bind_ip: None,
+                        socks_bound_addr: Some(bound.addr),
+                    },
+                ))
             },
         }
     }
@@ -777,7 +835,7 @@ impl UpstreamManager {
         target: SocketAddr,
     ) -> Result<f64> {
         let start = Instant::now();
-        let _stream = self.connect_via_upstream(config, target, bind_rr).await?;
+        let _ = self.connect_via_upstream(config, target, bind_rr).await?;
         Ok(start.elapsed().as_secs_f64() * 1000.0)
     }
 

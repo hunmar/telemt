@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
 use crate::network::probe::NetworkDecision;
+use crate::transport::UpstreamManager;
 
 use super::ConnRegistry;
 use super::codec::WriterCommand;
@@ -33,6 +34,7 @@ pub struct MePool {
     pub(super) writers: Arc<RwLock<Vec<MeWriter>>>,
     pub(super) rr: AtomicU64,
     pub(super) decision: NetworkDecision,
+    pub(super) upstream: Option<Arc<UpstreamManager>>,
     pub(super) rng: Arc<SecureRandom>,
     pub(super) proxy_tag: Option<Vec<u8>>,
     pub(super) proxy_secret: Arc<RwLock<Vec<u8>>>,
@@ -121,6 +123,7 @@ impl MePool {
         proxy_map_v6: HashMap<i32, Vec<(IpAddr, u16)>>,
         default_dc: Option<i32>,
         decision: NetworkDecision,
+        upstream: Option<Arc<UpstreamManager>>,
         rng: Arc<SecureRandom>,
         stats: Arc<crate::stats::Stats>,
         me_keepalive_enabled: bool,
@@ -148,6 +151,7 @@ impl MePool {
             writers: Arc::new(RwLock::new(Vec::new())),
             rr: AtomicU64::new(0),
             decision,
+            upstream,
             rng,
             proxy_tag,
             proxy_secret: Arc::new(RwLock::new(proxy_secret)),

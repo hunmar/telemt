@@ -509,6 +509,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     cfg_v6.map.clone(),
                     cfg_v4.default_dc.or(cfg_v6.default_dc),
                     decision.clone(),
+                    Some(upstream_manager.clone()),
                     rng.clone(),
                     stats.clone(),
                     config.general.me_keepalive_enabled,
