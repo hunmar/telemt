@@ -185,20 +185,81 @@ impl UpstreamManager {
         }
     }
 
+    #[cfg(unix)]
+    fn resolve_interface_addrs(name: &str, want_ipv6: bool) -> Vec<IpAddr> {
+        use nix::ifaddrs::getifaddrs;
+
+        let mut out = Vec::new();
+        if let Ok(addrs) = getifaddrs() {
+            for iface in addrs {
+                if iface.interface_name != name {
+                    continue;
+                }
+                if let Some(address) = iface.address {
+                    if let Some(v4) = address.as_sockaddr_in() {
+                        if !want_ipv6 {
+                            out.push(IpAddr::V4(v4.ip()));
+                        }
+                    } else if let Some(v6) = address.as_sockaddr_in6()
+                        && want_ipv6
+                    {
+                        out.push(IpAddr::V6(v6.ip()));
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     fn resolve_bind_address(
         interface: &Option<String>,
         bind_addresses: &Option<Vec<String>>,
         target: SocketAddr,
         rr: Option<&AtomicUsize>,
+        validate_ip_on_interface: bool,
     ) -> Option<IpAddr> {
         let want_ipv6 = target.is_ipv6();
 
         if let Some(addrs) = bind_addresses {
-            let candidates: Vec<IpAddr> = addrs
+            let mut candidates: Vec<IpAddr> = addrs
                 .iter()
                 .filter_map(|s| s.parse::<IpAddr>().ok())
                 .filter(|ip| ip.is_ipv6() == want_ipv6)
                 .collect();
+
+            // Explicit bind IP has strict priority over interface auto-selection.
+            if validate_ip_on_interface
+                && let Some(iface) = interface
+                && iface.parse::<IpAddr>().is_err()
+            {
+                #[cfg(unix)]
+                {
+                    let iface_addrs = Self::resolve_interface_addrs(iface, want_ipv6);
+                    if !iface_addrs.is_empty() {
+                        candidates.retain(|ip| {
+                            let ok = iface_addrs.contains(ip);
+                            if !ok {
+                                warn!(
+                                    interface = %iface,
+                                    bind_ip = %ip,
+                                    target = %target,
+                                    "Configured bind address is not assigned to interface"
+                                );
+                            }
+                            ok
+                        });
+                    } else if !candidates.is_empty() {
+                        warn!(
+                            interface = %iface,
+                            target = %target,
+                            "Configured interface has no addresses for target family; falling back to direct connect without bind"
+                        );
+                        candidates.clear();
+                    }
+                }
+            }
 
             if !candidates.is_empty() {
                 if let Some(counter) = rr {
@@ -206,6 +267,19 @@ impl UpstreamManager {
                     return Some(candidates[idx]);
                 }
                 return candidates.first().copied();
+            }
+
+            if validate_ip_on_interface
+                && interface
+                    .as_ref()
+                    .is_some_and(|iface| iface.parse::<IpAddr>().is_err())
+            {
+                warn!(
+                    interface = interface.as_deref().unwrap_or(""),
+                    target = %target,
+                    "No valid bind_addresses left for interface; falling back to direct connect without bind"
+                );
+                return None;
             }
         }
 
@@ -407,6 +481,7 @@ impl UpstreamManager {
                     bind_addresses,
                     target,
                     bind_rr.as_deref(),
+                    true,
                 );
 
                 let socket = create_outgoing_socket_bound(target, bind_ip)?;
@@ -461,6 +536,7 @@ impl UpstreamManager {
                         &None,
                         proxy_addr,
                         bind_rr.as_deref(),
+                        false,
                     );
 
                     let socket = create_outgoing_socket_bound(proxy_addr, bind_ip)?;
@@ -537,6 +613,7 @@ impl UpstreamManager {
                         &None,
                         proxy_addr,
                         bind_rr.as_deref(),
+                        false,
                     );
 
                     let socket = create_outgoing_socket_bound(proxy_addr, bind_ip)?;
