@@ -1,6 +1,7 @@
 [Unit]
 Description=Telemt
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -8,6 +9,7 @@ WorkingDirectory=/bin
 ExecStart=/bin/telemt /etc/telemt.toml
 Restart=on-failure
 LimitNOFILE=65536
+SELinuxContext=system_u:system_r:unconfined_service_t:s0
 
 [Install]
 WantedBy=multi-user.target
