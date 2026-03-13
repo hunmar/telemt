@@ -226,18 +226,24 @@ async fn probe_stun_servers_parallel(
     out
 }
 
-pub fn decide_network_capabilities(config: &NetworkConfig, probe: &NetworkProbe) -> NetworkDecision {
+pub fn decide_network_capabilities(
+    config: &NetworkConfig,
+    probe: &NetworkProbe,
+    middle_proxy_nat_ip: Option<IpAddr>,
+) -> NetworkDecision {
     let ipv4_dc = config.ipv4 && probe.detected_ipv4.is_some();
     let ipv6_dc = config.ipv6.unwrap_or(probe.detected_ipv6.is_some()) && probe.detected_ipv6.is_some();
+    let nat_ip_v4 = matches!(middle_proxy_nat_ip, Some(IpAddr::V4(_)));
+    let nat_ip_v6 = matches!(middle_proxy_nat_ip, Some(IpAddr::V6(_)));
 
     let ipv4_me = config.ipv4
         && probe.detected_ipv4.is_some()
-        && (!probe.ipv4_is_bogon || probe.reflected_ipv4.is_some());
+        && (!probe.ipv4_is_bogon || probe.reflected_ipv4.is_some() || nat_ip_v4);
 
     let ipv6_enabled = config.ipv6.unwrap_or(probe.detected_ipv6.is_some());
     let ipv6_me = ipv6_enabled
         && probe.detected_ipv6.is_some()
-        && (!probe.ipv6_is_bogon || probe.reflected_ipv6.is_some());
+        && (!probe.ipv6_is_bogon || probe.reflected_ipv6.is_some() || nat_ip_v6);
 
     let effective_prefer = match config.prefer {
         6 if ipv6_me || ipv6_dc => 6,
@@ -259,6 +265,58 @@ pub fn decide_network_capabilities(config: &NetworkConfig, probe: &NetworkProbe)
         ipv6_me,
         effective_prefer,
         effective_multipath,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NetworkConfig;
+
+    #[test]
+    fn manual_nat_ip_enables_ipv4_me_without_reflection() {
+        let config = NetworkConfig {
+            ipv4: true,
+            ..Default::default()
+        };
+        let probe = NetworkProbe {
+            detected_ipv4: Some(Ipv4Addr::new(10, 0, 0, 10)),
+            ipv4_is_bogon: true,
+            ..Default::default()
+        };
+
+        let decision = decide_network_capabilities(
+            &config,
+            &probe,
+            Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
+        );
+
+        assert!(decision.ipv4_me);
+    }
+
+    #[test]
+    fn manual_nat_ip_does_not_enable_other_family() {
+        let config = NetworkConfig {
+            ipv4: true,
+            ipv6: Some(true),
+            ..Default::default()
+        };
+        let probe = NetworkProbe {
+            detected_ipv4: Some(Ipv4Addr::new(10, 0, 0, 10)),
+            detected_ipv6: Some(Ipv6Addr::LOCALHOST),
+            ipv4_is_bogon: true,
+            ipv6_is_bogon: true,
+            ..Default::default()
+        };
+
+        let decision = decide_network_capabilities(
+            &config,
+            &probe,
+            Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
+        );
+
+        assert!(decision.ipv4_me);
+        assert!(!decision.ipv6_me);
     }
 }
 
