@@ -44,7 +44,7 @@ tls_domain = umweltschutz.de
 
 Этот домен используется клиентом как SNI в ClientHello
 
-### 3. Сервер-заглушка
+### 3 Сервер-заглушка
 
 Вы поднимаете обычный HTTPS-сервер, например **nginx**, с сертификатом для этого домена.
 
@@ -93,11 +93,11 @@ TLS connection -> umweltschutz.de
 
 Хотя внутри передаётся **MTProto-трафик Telegram**
 
-# Сценарий 2 - обычный TLS-клиент (crawler, scanner, браузер)
+# Сценарий 2 - обычный TLS-клиент - crawler / scanner / browser
 
 Если Telemt не обнаруживает валидный MTProxy-ключ:
 
-соединение **переключается в режим TCP-Splitting (TCP-Splicing)**.
+соединение **переключается в режим TCP-Splitting / TCP-Splicing**.
 
 В этом режиме Telemt:
 
