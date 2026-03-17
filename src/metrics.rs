@@ -21,6 +21,7 @@ use crate::transport::{ListenOptions, create_listener};
 
 pub async fn serve(
     port: u16,
+    listen: Option<String>,
     stats: Arc<Stats>,
     beobachten: Arc<BeobachtenStore>,
     ip_tracker: Arc<UserIpTracker>,
@@ -28,6 +29,33 @@ pub async fn serve(
     whitelist: Vec<IpNetwork>,
 ) {
     let whitelist = Arc::new(whitelist);
+
+    // If `metrics_listen` is set, bind on that single address only.
+    if let Some(ref listen_addr) = listen {
+        let addr: SocketAddr = match listen_addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(error = %e, "Invalid metrics_listen address: {}", listen_addr);
+                return;
+            }
+        };
+        let is_ipv6 = addr.is_ipv6();
+        match bind_metrics_listener(addr, is_ipv6) {
+            Ok(listener) => {
+                info!("Metrics endpoint: http://{}/metrics and /beobachten", addr);
+                serve_listener(
+                    listener, stats, beobachten, ip_tracker, config_rx, whitelist,
+                )
+                .await;
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to bind metrics on {}", addr);
+            }
+        }
+        return;
+    }
+
+    // Fallback: bind on 0.0.0.0 and [::] using metrics_port.
     let mut listener_v4 = None;
     let mut listener_v6 = None;
 

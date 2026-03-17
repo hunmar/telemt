@@ -279,11 +279,32 @@ pub(crate) async fn spawn_metrics_if_configured(
     ip_tracker: Arc<UserIpTracker>,
     config_rx: watch::Receiver<Arc<ProxyConfig>>,
 ) {
-    if let Some(port) = config.server.metrics_port {
+    // metrics_listen takes precedence; fall back to metrics_port for backward compat.
+    let metrics_target: Option<(u16, Option<String>)> =
+        if let Some(ref listen) = config.server.metrics_listen {
+            match listen.parse::<std::net::SocketAddr>() {
+                Ok(addr) => Some((addr.port(), Some(listen.clone()))),
+                Err(e) => {
+                    startup_tracker
+                        .skip_component(
+                            COMPONENT_METRICS_START,
+                            Some(format!("invalid metrics_listen \"{}\": {}", listen, e)),
+                        )
+                        .await;
+                    None
+                }
+            }
+        } else {
+            config.server.metrics_port.map(|p| (p, None))
+        };
+
+    if let Some((port, listen)) = metrics_target {
+        let fallback_label = format!("port {}", port);
+        let label = listen.as_deref().unwrap_or(&fallback_label);
         startup_tracker
             .start_component(
                 COMPONENT_METRICS_START,
-                Some(format!("spawn metrics endpoint on {}", port)),
+                Some(format!("spawn metrics endpoint on {}", label)),
             )
             .await;
         let stats = stats.clone();
@@ -294,6 +315,7 @@ pub(crate) async fn spawn_metrics_if_configured(
         tokio::spawn(async move {
             metrics::serve(
                 port,
+                listen,
                 stats,
                 beobachten,
                 ip_tracker_metrics,
@@ -308,7 +330,7 @@ pub(crate) async fn spawn_metrics_if_configured(
                 Some("metrics task spawned".to_string()),
             )
             .await;
-    } else {
+    } else if config.server.metrics_listen.is_none() {
         startup_tracker
             .skip_component(
                 COMPONENT_METRICS_START,

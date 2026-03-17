@@ -1156,9 +1156,17 @@ pub struct ServerConfig {
     #[serde(default = "default_proxy_protocol_header_timeout_ms")]
     pub proxy_protocol_header_timeout_ms: u64,
 
+    /// Port for the Prometheus-compatible metrics endpoint.
+    /// Enables metrics when set; binds on all interfaces (dual-stack) by default.
     #[serde(default)]
     pub metrics_port: Option<u16>,
 
+    /// Listen address for metrics in `IP:PORT` format (e.g. `"127.0.0.1:9090"`).
+    /// When set, takes precedence over `metrics_port` and binds on the specified address only.
+    #[serde(default)]
+    pub metrics_listen: Option<String>,
+
+    /// CIDR whitelist for the metrics endpoint.
     #[serde(default = "default_metrics_whitelist")]
     pub metrics_whitelist: Vec<IpNetwork>,
 
@@ -1186,6 +1194,7 @@ impl Default for ServerConfig {
             proxy_protocol: false,
             proxy_protocol_header_timeout_ms: default_proxy_protocol_header_timeout_ms(),
             metrics_port: None,
+            metrics_listen: None,
             metrics_whitelist: default_metrics_whitelist(),
             api: ApiConfig::default(),
             listeners: Vec::new(),
