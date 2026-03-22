@@ -553,6 +553,20 @@ pub(crate) fn default_mask_shape_above_cap_blur_max_bytes() -> usize {
     512
 }
 
+#[cfg(not(test))]
+pub(crate) fn default_mask_relay_max_bytes() -> usize {
+    5 * 1024 * 1024
+}
+
+#[cfg(test)]
+pub(crate) fn default_mask_relay_max_bytes() -> usize {
+    32 * 1024
+}
+
+pub(crate) fn default_mask_classifier_prefetch_timeout_ms() -> u64 {
+    5
+}
+
 pub(crate) fn default_mask_timing_normalization_enabled() -> bool {
     false
 }

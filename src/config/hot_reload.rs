@@ -600,6 +600,9 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         || old.censorship.mask_shape_above_cap_blur != new.censorship.mask_shape_above_cap_blur
         || old.censorship.mask_shape_above_cap_blur_max_bytes
             != new.censorship.mask_shape_above_cap_blur_max_bytes
+        || old.censorship.mask_relay_max_bytes != new.censorship.mask_relay_max_bytes
+        || old.censorship.mask_classifier_prefetch_timeout_ms
+            != new.censorship.mask_classifier_prefetch_timeout_ms
         || old.censorship.mask_timing_normalization_enabled
             != new.censorship.mask_timing_normalization_enabled
         || old.censorship.mask_timing_normalization_floor_ms

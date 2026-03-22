@@ -186,6 +186,67 @@ fn handshake_timeout_with_mask_grace(config: &ProxyConfig) -> Duration {
     }
 }
 
+const MASK_CLASSIFIER_PREFETCH_WINDOW: usize = 16;
+#[cfg(test)]
+const MASK_CLASSIFIER_PREFETCH_TIMEOUT: Duration = Duration::from_millis(5);
+
+fn mask_classifier_prefetch_timeout(config: &ProxyConfig) -> Duration {
+    Duration::from_millis(config.censorship.mask_classifier_prefetch_timeout_ms)
+}
+
+fn should_prefetch_mask_classifier_window(initial_data: &[u8]) -> bool {
+    if initial_data.len() >= MASK_CLASSIFIER_PREFETCH_WINDOW {
+        return false;
+    }
+
+    if initial_data.is_empty() {
+        // Empty initial_data means there is no client probe prefix to refine.
+        // Prefetching in this case can consume fallback relay payload bytes and
+        // accidentally route them through shaping heuristics.
+        return false;
+    }
+
+    if initial_data[0] == 0x16 || initial_data.starts_with(b"SSH-") {
+        return false;
+    }
+
+    initial_data.iter().all(|b| b.is_ascii_alphabetic() || *b == b' ')
+}
+
+#[cfg(test)]
+async fn extend_masking_initial_window<R>(reader: &mut R, initial_data: &mut Vec<u8>)
+where
+    R: AsyncRead + Unpin,
+{
+    extend_masking_initial_window_with_timeout(reader, initial_data, MASK_CLASSIFIER_PREFETCH_TIMEOUT)
+        .await;
+}
+
+async fn extend_masking_initial_window_with_timeout<R>(
+    reader: &mut R,
+    initial_data: &mut Vec<u8>,
+    prefetch_timeout: Duration,
+)
+where
+    R: AsyncRead + Unpin,
+{
+    if !should_prefetch_mask_classifier_window(initial_data) {
+        return;
+    }
+
+    let need = MASK_CLASSIFIER_PREFETCH_WINDOW.saturating_sub(initial_data.len());
+    if need == 0 {
+        return;
+    }
+
+    let mut extra = [0u8; MASK_CLASSIFIER_PREFETCH_WINDOW];
+    if let Ok(Ok(n)) = timeout(prefetch_timeout, reader.read(&mut extra[..need])).await
+        && n > 0
+    {
+        initial_data.extend_from_slice(&extra[..n]);
+    }
+}
+
 fn masking_outcome<R, W>(
     reader: R,
     writer: W,
@@ -200,6 +261,15 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     HandshakeOutcome::NeedsMasking(Box::pin(async move {
+        let mut reader = reader;
+        let mut initial_data = initial_data;
+        extend_masking_initial_window_with_timeout(
+            &mut reader,
+            &mut initial_data,
+            mask_classifier_prefetch_timeout(&config),
+        )
+        .await;
+
         handle_bad_client(
             reader,
             writer,
@@ -1320,6 +1390,38 @@ mod masking_shape_classifier_fuzz_redteam_expected_fail_tests;
 #[cfg(test)]
 #[path = "tests/client_masking_probe_evasion_blackhat_tests.rs"]
 mod masking_probe_evasion_blackhat_tests;
+
+#[cfg(test)]
+#[path = "tests/client_masking_fragmented_classifier_security_tests.rs"]
+mod masking_fragmented_classifier_security_tests;
+
+#[cfg(test)]
+#[path = "tests/client_masking_replay_timing_security_tests.rs"]
+mod masking_replay_timing_security_tests;
+
+#[cfg(test)]
+#[path = "tests/client_masking_http2_fragmented_preface_security_tests.rs"]
+mod masking_http2_fragmented_preface_security_tests;
+
+#[cfg(test)]
+#[path = "tests/client_masking_prefetch_invariant_security_tests.rs"]
+mod masking_prefetch_invariant_security_tests;
+
+#[cfg(test)]
+#[path = "tests/client_masking_prefetch_timing_matrix_security_tests.rs"]
+mod masking_prefetch_timing_matrix_security_tests;
+
+#[cfg(test)]
+#[path = "tests/client_masking_prefetch_config_runtime_security_tests.rs"]
+mod masking_prefetch_config_runtime_security_tests;
+
+#[cfg(test)]
+#[path = "tests/client_masking_prefetch_config_pipeline_integration_security_tests.rs"]
+mod masking_prefetch_config_pipeline_integration_security_tests;
+
+#[cfg(test)]
+#[path = "tests/client_masking_prefetch_strict_boundary_security_tests.rs"]
+mod masking_prefetch_strict_boundary_security_tests;
 
 #[cfg(test)]
 #[path = "tests/client_beobachten_ttl_bounds_security_tests.rs"]

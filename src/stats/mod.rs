@@ -1884,6 +1884,32 @@ impl Stats {
         stats.octets_to_client.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    pub fn sub_user_octets_to(&self, user: &str, bytes: u64) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
+        self.maybe_cleanup_user_stats();
+        let Some(stats) = self.user_stats.get(user) else {
+            return;
+        };
+
+        Self::touch_user_stats(stats.value());
+        let counter = &stats.octets_to_client;
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(bytes);
+            match counter.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
     pub fn increment_user_msgs_from(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
@@ -2440,3 +2466,7 @@ mod connection_lease_security_tests;
 #[cfg(test)]
 #[path = "tests/replay_checker_security_tests.rs"]
 mod replay_checker_security_tests;
+
+#[cfg(test)]
+#[path = "tests/user_octets_sub_security_tests.rs"]
+mod user_octets_sub_security_tests;

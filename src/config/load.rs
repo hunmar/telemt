@@ -430,6 +430,25 @@ impl ProxyConfig {
             ));
         }
 
+        if config.censorship.mask_relay_max_bytes == 0 {
+            return Err(ProxyError::Config(
+                "censorship.mask_relay_max_bytes must be > 0".to_string(),
+            ));
+        }
+
+        if config.censorship.mask_relay_max_bytes > 67_108_864 {
+            return Err(ProxyError::Config(
+                "censorship.mask_relay_max_bytes must be <= 67108864".to_string(),
+            ));
+        }
+
+        if !(5..=50).contains(&config.censorship.mask_classifier_prefetch_timeout_ms) {
+            return Err(ProxyError::Config(
+                "censorship.mask_classifier_prefetch_timeout_ms must be within [5, 50]"
+                    .to_string(),
+            ));
+        }
+
         if config.censorship.mask_timing_normalization_ceiling_ms
             < config.censorship.mask_timing_normalization_floor_ms
         {
@@ -1133,6 +1152,10 @@ mod load_security_tests;
 #[cfg(test)]
 #[path = "tests/load_mask_shape_security_tests.rs"]
 mod load_mask_shape_security_tests;
+
+#[cfg(test)]
+#[path = "tests/load_mask_classifier_prefetch_timeout_security_tests.rs"]
+mod load_mask_classifier_prefetch_timeout_security_tests;
 
 #[cfg(test)]
 mod tests {

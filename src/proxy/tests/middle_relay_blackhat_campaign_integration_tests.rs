@@ -9,6 +9,7 @@ use tokio::time::{Duration, timeout};
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn blackhat_campaign_saturation_quota_race_with_queue_pressure_stays_fail_closed() {
     let _guard = super::quota_user_lock_test_scope();
+    let _pressure_guard = super::relay_idle_pressure_test_scope();
     let map = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
     map.clear();
 

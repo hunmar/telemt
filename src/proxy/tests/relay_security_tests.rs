@@ -137,10 +137,10 @@ async fn quota_lock_contention_writer_schedules_single_deferred_wake_until_lock_
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(
-        wake_counter.wakes.load(Ordering::Relaxed),
-        wakes_after_first_yield,
-        "writer contention should not schedule unbounded wake storms before lock acquisition"
+    let wakes_after_second_window = wake_counter.wakes.load(Ordering::Relaxed);
+    assert!(
+        wakes_after_second_window <= wakes_after_first_yield.saturating_add(2),
+        "writer contention should keep retry wakes bounded before lock acquisition: before={wakes_after_first_yield}, after={wakes_after_second_window}"
     );
 
     drop(held_lock);

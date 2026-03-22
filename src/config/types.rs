@@ -1450,6 +1450,14 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_mask_shape_above_cap_blur_max_bytes")]
     pub mask_shape_above_cap_blur_max_bytes: usize,
 
+    /// Maximum bytes relayed per direction on unauthenticated masking fallback paths.
+    #[serde(default = "default_mask_relay_max_bytes")]
+    pub mask_relay_max_bytes: usize,
+
+    /// Prefetch timeout (ms) for extending fragmented masking classifier window.
+    #[serde(default = "default_mask_classifier_prefetch_timeout_ms")]
+    pub mask_classifier_prefetch_timeout_ms: u64,
+
     /// Enable outcome-time normalization envelope for masking fallback.
     #[serde(default = "default_mask_timing_normalization_enabled")]
     pub mask_timing_normalization_enabled: bool,
@@ -1488,6 +1496,8 @@ impl Default for AntiCensorshipConfig {
             mask_shape_bucket_cap_bytes: default_mask_shape_bucket_cap_bytes(),
             mask_shape_above_cap_blur: default_mask_shape_above_cap_blur(),
             mask_shape_above_cap_blur_max_bytes: default_mask_shape_above_cap_blur_max_bytes(),
+            mask_relay_max_bytes: default_mask_relay_max_bytes(),
+            mask_classifier_prefetch_timeout_ms: default_mask_classifier_prefetch_timeout_ms(),
             mask_timing_normalization_enabled: default_mask_timing_normalization_enabled(),
             mask_timing_normalization_floor_ms: default_mask_timing_normalization_floor_ms(),
             mask_timing_normalization_ceiling_ms: default_mask_timing_normalization_ceiling_ms(),
