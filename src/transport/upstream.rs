@@ -220,12 +220,12 @@ impl UpstreamStream {
         }
     }
 
+    #[allow(dead_code)]
     pub fn into_tcp(self) -> Result<TcpStream> {
         match self {
             Self::Tcp(stream) => Ok(stream),
             Self::Shadowsocks(_) => Err(ProxyError::Config(
-                "shadowsocks upstreams are not supported when general.use_middle_proxy = true"
-                    .to_string(),
+                "selected upstream does not expose a raw TCP stream".to_string(),
             )),
         }
     }
@@ -810,6 +810,7 @@ impl UpstreamManager {
     }
 
     /// Connect to target through a selected upstream and return egress details.
+    #[allow(dead_code)]
     pub async fn connect_with_details(
         &self,
         target: SocketAddr,
