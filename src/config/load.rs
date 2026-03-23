@@ -129,24 +129,52 @@ fn sanitize_ad_tag(ad_tag: &mut Option<String>) {
 }
 
 fn validate_upstreams(config: &ProxyConfig) -> Result<()> {
-    let has_enabled_shadowsocks = config.upstreams.iter().any(|upstream| {
-        upstream.enabled && matches!(upstream.upstream_type, UpstreamType::Shadowsocks { .. })
-    });
-
-    if has_enabled_shadowsocks && config.general.use_middle_proxy {
-        return Err(ProxyError::Config(
-            "shadowsocks upstreams require general.use_middle_proxy = false".to_string(),
-        ));
-    }
-
     for upstream in &config.upstreams {
-        if let UpstreamType::Shadowsocks { url, .. } = &upstream.upstream_type {
+        if let UpstreamType::Shadowsocks {
+            url,
+            relay_address,
+            relay_token,
+            ..
+        } = &upstream.upstream_type
+        {
             let parsed = ShadowsocksServerConfig::from_url(url)
                 .map_err(|error| ProxyError::Config(format!("invalid shadowsocks url: {error}")))?;
             if parsed.plugin().is_some() {
                 return Err(ProxyError::Config(
                     "shadowsocks plugins are not supported".to_string(),
                 ));
+            }
+            match (relay_address.as_deref(), relay_token.as_deref()) {
+                (Some(relay_address), Some(relay_token)) => {
+                    if relay_address.parse::<SocketAddr>().is_err() {
+                        return Err(ProxyError::Config(format!(
+                            "invalid shadowsocks relay_address: {relay_address}"
+                        )));
+                    }
+                    if relay_token.trim().is_empty() {
+                        return Err(ProxyError::Config(
+                            "shadowsocks relay_token cannot be empty".to_string(),
+                        ));
+                    }
+                    if relay_token.len() > u8::MAX as usize {
+                        return Err(ProxyError::Config(
+                            "shadowsocks relay_token must be at most 255 bytes".to_string(),
+                        ));
+                    }
+                }
+                (Some(_), None) => {
+                    return Err(ProxyError::Config(
+                        "shadowsocks relay_token is required when relay_address is set"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(ProxyError::Config(
+                        "shadowsocks relay_address is required when relay_token is set"
+                            .to_string(),
+                    ));
+                }
+                (None, None) => {}
             }
         }
     }
@@ -2267,15 +2295,23 @@ mod tests {
 
         assert!(matches!(
             &cfg.upstreams[0].upstream_type,
-            UpstreamType::Shadowsocks { url, interface }
-                if url == TEST_SHADOWSOCKS_URL && interface.as_deref() == Some("127.0.0.2")
+            UpstreamType::Shadowsocks {
+                url,
+                interface,
+                relay_address,
+                relay_token,
+            }
+                if url == TEST_SHADOWSOCKS_URL
+                    && interface.as_deref() == Some("127.0.0.2")
+                    && relay_address.is_none()
+                    && relay_token.is_none()
         ));
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn shadowsocks_requires_direct_mode() {
+    fn shadowsocks_upstream_with_relay_loads_successfully() {
         let toml = format!(
             r#"
             [general]
@@ -2290,15 +2326,119 @@ mod tests {
             [[upstreams]]
             type = "shadowsocks"
             url = "{url}"
+            relay_address = "10.129.0.4:19080"
+            relay_token = "relay-secret"
             "#,
             url = TEST_SHADOWSOCKS_URL,
         );
         let dir = std::env::temp_dir();
-        let path = dir.join("telemt_shadowsocks_me_reject_test.toml");
+        let path = dir.join("telemt_shadowsocks_relay_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+
+        assert!(matches!(
+            &cfg.upstreams[0].upstream_type,
+            UpstreamType::Shadowsocks {
+                url,
+                relay_address,
+                relay_token,
+                ..
+            }
+                if url == TEST_SHADOWSOCKS_URL
+                    && relay_address.as_deref() == Some("10.129.0.4:19080")
+                    && relay_token.as_deref() == Some("relay-secret")
+        ));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_shadowsocks_relay_address_is_rejected() {
+        let toml = format!(
+            r#"
+            [general]
+            use_middle_proxy = true
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [[upstreams]]
+            type = "shadowsocks"
+            url = "{url}"
+            relay_address = "localhost:not-a-port"
+            relay_token = "relay-secret"
+            "#,
+            url = TEST_SHADOWSOCKS_URL,
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_shadowsocks_relay_invalid_test.toml");
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
 
-        assert!(err.contains("shadowsocks upstreams require general.use_middle_proxy = false"));
+        assert!(err.contains("invalid shadowsocks relay_address"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn shadowsocks_relay_requires_token() {
+        let toml = format!(
+            r#"
+            [general]
+            use_middle_proxy = true
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [[upstreams]]
+            type = "shadowsocks"
+            url = "{url}"
+            relay_address = "10.129.0.4:19080"
+            "#,
+            url = TEST_SHADOWSOCKS_URL,
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_shadowsocks_relay_missing_token_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+        assert!(err.contains("shadowsocks relay_token is required"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn shadowsocks_is_allowed_with_middle_proxy() {
+        let toml = format!(
+            r#"
+            [general]
+            use_middle_proxy = true
+            me_socks_kdf_policy = "compat"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [[upstreams]]
+            type = "shadowsocks"
+            url = "{url}"
+            "#,
+            url = TEST_SHADOWSOCKS_URL,
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_shadowsocks_me_allow_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let loaded = ProxyConfig::load(&path).unwrap();
+
+        assert_eq!(loaded.general.me_socks_kdf_policy, MeSocksKdfPolicy::Compat);
 
         let _ = std::fs::remove_file(path);
     }

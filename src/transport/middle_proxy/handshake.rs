@@ -1,13 +1,15 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use socket2::{SockRef, TcpKeepalive};
 #[cfg(target_os = "linux")]
 use libc;
+#[cfg(unix)]
+use std::os::fd::BorrowedFd;
 #[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::RawFd;
 #[cfg(target_os = "linux")]
 use std::os::raw::c_int;
 
@@ -26,7 +28,7 @@ use crate::protocol::constants::{
     ME_CONNECT_TIMEOUT_SECS, ME_HANDSHAKE_TIMEOUT_SECS, RPC_CRYPTO_AES_U32,
     RPC_HANDSHAKE_ERROR_U32, rpc_crypto_flags,
 };
-use crate::transport::{UpstreamEgressInfo, UpstreamRouteKind};
+use crate::transport::{UpstreamEgressInfo, UpstreamRouteKind, UpstreamStream};
 
 use super::codec::{
     RpcChecksumMode, build_handshake_payload, build_nonce_payload, build_rpc_frame,
@@ -57,8 +59,8 @@ impl KdfClientPortSource {
 
 /// Result of a successful ME handshake with timings.
 pub(crate) struct HandshakeOutput {
-    pub rd: ReadHalf<TcpStream>,
-    pub wr: WriteHalf<TcpStream>,
+    pub rd: ReadHalf<UpstreamStream>,
+    pub wr: WriteHalf<UpstreamStream>,
     pub source_ip: IpAddr,
     pub read_key: [u8; 32],
     pub read_iv: [u8; 16],
@@ -89,15 +91,19 @@ impl MePool {
         i16::try_from(self.resolve_dc_for_endpoint(addr).await).ok()
     }
 
-    fn direct_bind_ip_for_stun(
+    fn non_socks_bind_ip_for_stun(
         family: IpFamily,
         upstream_egress: Option<UpstreamEgressInfo>,
     ) -> Option<IpAddr> {
         let info = upstream_egress?;
-        if info.route_kind != UpstreamRouteKind::Direct {
-            return None;
-        }
-        match (family, info.direct_bind_ip) {
+        let bind_ip = match info.route_kind {
+            UpstreamRouteKind::Direct => info
+                .direct_bind_ip
+                .or_else(|| info.local_addr.map(|addr| addr.ip())),
+            UpstreamRouteKind::Shadowsocks => info.local_addr.map(|addr| addr.ip()),
+            UpstreamRouteKind::Socks4 | UpstreamRouteKind::Socks5 => None,
+        };
+        match (family, bind_ip) {
             (IpFamily::V4, Some(IpAddr::V4(ip))) => Some(IpAddr::V4(ip)),
             (IpFamily::V6, Some(IpAddr::V6(ip))) => Some(IpAddr::V6(ip)),
             _ => None,
@@ -111,7 +117,7 @@ impl MePool {
         let info = upstream_egress?;
         if !matches!(
             info.route_kind,
-            UpstreamRouteKind::Socks4 | UpstreamRouteKind::Socks5
+            UpstreamRouteKind::Socks4 | UpstreamRouteKind::Socks5 | UpstreamRouteKind::Shadowsocks
         ) {
             return None;
         }
@@ -120,17 +126,29 @@ impl MePool {
             (family, bound.ip()),
             (IpFamily::V4, IpAddr::V4(_)) | (IpFamily::V6, IpAddr::V6(_))
         );
-        if !family_matches || is_bogon(bound.ip()) || bound.ip().is_unspecified() {
+        if !family_matches || bound.ip().is_unspecified() {
             return None;
         }
         Some(bound)
     }
 
-    fn is_socks_route(upstream_egress: Option<UpstreamEgressInfo>) -> bool {
+    fn uses_proxy_kdf_policy(upstream_egress: Option<UpstreamEgressInfo>) -> bool {
         matches!(
             upstream_egress.map(|info| info.route_kind),
-            Some(UpstreamRouteKind::Socks4 | UpstreamRouteKind::Socks5)
+            Some(
+                UpstreamRouteKind::Socks4
+                    | UpstreamRouteKind::Socks5
+                    | UpstreamRouteKind::Shadowsocks
+            )
         )
+    }
+
+    fn proxy_kdf_route_label(upstream_egress: Option<UpstreamEgressInfo>) -> &'static str {
+        match upstream_egress.map(|info| info.route_kind) {
+            Some(UpstreamRouteKind::Shadowsocks) => "Shadowsocks",
+            Some(UpstreamRouteKind::Socks4 | UpstreamRouteKind::Socks5) => "SOCKS",
+            _ => "upstream",
+        }
     }
 
     fn bnd_port_status(bound: Option<SocketAddr>) -> BndPortStatus {
@@ -141,12 +159,12 @@ impl MePool {
         }
     }
 
-    /// TCP connect with timeout + return RTT in milliseconds.
+    /// Connect to a middle-proxy endpoint and return RTT in milliseconds.
     pub(crate) async fn connect_tcp(
         &self,
         addr: SocketAddr,
         dc_idx_override: Option<i16>,
-    ) -> Result<(TcpStream, f64, Option<UpstreamEgressInfo>)> {
+    ) -> Result<(UpstreamStream, f64, Option<UpstreamEgressInfo>)> {
         let start = Instant::now();
         let (stream, upstream_egress) = if let Some(upstream) = &self.upstream {
             let dc_idx = if let Some(dc_idx) = dc_idx_override {
@@ -154,7 +172,9 @@ impl MePool {
             } else {
                 self.resolve_dc_idx_for_endpoint(addr).await
             };
-            let (stream, egress) = upstream.connect_with_details(addr, dc_idx, None).await?;
+            let (stream, egress) = upstream
+                .connect_stream_with_details(addr, dc_idx, None)
+                .await?;
             (stream, Some(egress))
         } else {
             let connect_fut = async {
@@ -183,7 +203,7 @@ impl MePool {
                 .map_err(|_| ProxyError::ConnectionTimeout {
                     addr: addr.to_string(),
                 })??;
-            (stream, None)
+            (UpstreamStream::Tcp(stream), None)
         };
 
         let connect_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -192,14 +212,22 @@ impl MePool {
             warn!(error = %e, "ME keepalive setup failed");
         }
         #[cfg(target_os = "linux")]
-        if let Err(e) = Self::configure_user_timeout(stream.as_raw_fd()) {
+        if let Err(e) = Self::configure_user_timeout(stream.raw_fd()) {
             warn!(error = %e, "ME TCP_USER_TIMEOUT setup failed");
         }
         Ok((stream, connect_ms, upstream_egress))
     }
 
-    fn configure_keepalive(stream: &TcpStream) -> std::io::Result<()> {
-        let sock = SockRef::from(stream);
+    fn configure_keepalive(stream: &UpstreamStream) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let borrowed = unsafe { BorrowedFd::borrow_raw(stream.raw_fd()) };
+        #[cfg(unix)]
+        let sock = SockRef::from(&borrowed);
+        #[cfg(not(unix))]
+        let sock = match stream {
+            UpstreamStream::Tcp(stream) => SockRef::from(stream),
+            UpstreamStream::Shadowsocks(_) => return Ok(()),
+        };
         let ka = TcpKeepalive::new().with_time(Duration::from_secs(30));
 
         // Mirror socket2 v0.5.10 target gate for with_retries(), the stricter method.
@@ -243,11 +271,11 @@ impl MePool {
         Ok(())
     }
 
-    /// Perform full ME RPC handshake on an established TCP stream.
+    /// Perform full ME RPC handshake on an established upstream stream.
     /// Returns cipher keys/ivs and split halves; does not register writer.
     pub(crate) async fn handshake_only(
         &self,
-        stream: TcpStream,
+        stream: UpstreamStream,
         addr: SocketAddr,
         upstream_egress: Option<UpstreamEgressInfo>,
         rng: &SecureRandom,
@@ -264,14 +292,16 @@ impl MePool {
         } else {
             IpFamily::V6
         };
-        let is_socks_route = Self::is_socks_route(upstream_egress);
-        let raw_socks_bound_addr = if is_socks_route {
+        let uses_proxy_kdf_policy = Self::uses_proxy_kdf_policy(upstream_egress);
+        let raw_socks_bound_addr = if uses_proxy_kdf_policy {
             upstream_egress.and_then(|info| info.socks_bound_addr)
         } else {
             None
         };
-        let socks_bound_addr = Self::select_socks_bound_addr(family, upstream_egress);
-        let bnd_addr_status = if !is_socks_route {
+        let socks_bound_addr = Self::select_socks_bound_addr(family, upstream_egress)
+            .map(|bound| SocketAddr::new(self.translate_ip_for_nat(bound.ip()), bound.port()))
+            .filter(|bound| !is_bogon(bound.ip()) && !bound.ip().is_unspecified());
+        let bnd_addr_status = if !uses_proxy_kdf_policy {
             BndAddrStatus::Error
         } else if raw_socks_bound_addr.is_some() && socks_bound_addr.is_none() {
             BndAddrStatus::Bogon
@@ -280,7 +310,7 @@ impl MePool {
         } else {
             BndAddrStatus::Error
         };
-        let bnd_port_status = if is_socks_route {
+        let bnd_port_status = if uses_proxy_kdf_policy {
             Self::bnd_port_status(raw_socks_bound_addr)
         } else {
             BndPortStatus::Error
@@ -288,19 +318,21 @@ impl MePool {
         record_bnd_status(bnd_addr_status, bnd_port_status, raw_socks_bound_addr);
         let reflected = if let Some(bound) = socks_bound_addr {
             Some(bound)
-        } else if is_socks_route {
+        } else if uses_proxy_kdf_policy {
             match self.socks_kdf_policy() {
                 MeSocksKdfPolicy::Strict => {
                     self.stats.increment_me_socks_kdf_strict_reject();
                     return Err(ProxyError::InvalidHandshake(
-                        "SOCKS route returned no valid BND.ADDR for ME KDF (strict policy)"
-                            .to_string(),
+                        format!(
+                            "{} route returned no valid BND.ADDR for ME KDF (strict policy)",
+                            Self::proxy_kdf_route_label(upstream_egress)
+                        ),
                     ));
                 }
                 MeSocksKdfPolicy::Compat => {
                     self.stats.increment_me_socks_kdf_compat_fallback();
                     if self.nat_probe {
-                        let bind_ip = Self::direct_bind_ip_for_stun(family, upstream_egress);
+                        let bind_ip = Self::non_socks_bind_ip_for_stun(family, upstream_egress);
                         self.maybe_reflect_public_addr(family, bind_ip).await
                     } else {
                         None
@@ -308,7 +340,7 @@ impl MePool {
                 }
             }
         } else if self.nat_probe {
-            let bind_ip = Self::direct_bind_ip_for_stun(family, upstream_egress);
+            let bind_ip = Self::non_socks_bind_ip_for_stun(family, upstream_egress);
             self.maybe_reflect_public_addr(family, bind_ip).await
         } else {
             None
@@ -722,6 +754,8 @@ mod tests {
     use std::io::ErrorKind;
     use tokio::net::{TcpListener, TcpStream};
 
+    use crate::transport::{UpstreamEgressInfo, UpstreamRouteKind, UpstreamStream};
+
     #[tokio::test]
     async fn test_configure_keepalive_loopback() {
         let listener = match TcpListener::bind("127.0.0.1:0").await {
@@ -740,6 +774,7 @@ mod tests {
             Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
             Err(error) => panic!("connect failed: {error}"),
         };
+        let stream = UpstreamStream::Tcp(stream);
 
         if let Err(error) = MePool::configure_keepalive(&stream) {
             if error.kind() == ErrorKind::PermissionDenied {
@@ -776,5 +811,91 @@ mod tests {
             .with_time(Duration::from_secs(30))
             .with_interval(Duration::from_secs(10))
             .with_retries(3);
+    }
+
+    #[test]
+    fn direct_route_prefers_explicit_bind_ip_for_stun() {
+        let bind_ip: IpAddr = "198.51.100.10".parse().unwrap();
+        let local_addr: SocketAddr = "198.51.100.20:40000".parse().unwrap();
+        let egress = UpstreamEgressInfo {
+            upstream_id: 0,
+            route_kind: UpstreamRouteKind::Direct,
+            local_addr: Some(local_addr),
+            direct_bind_ip: Some(bind_ip),
+            socks_bound_addr: None,
+            socks_proxy_addr: None,
+        };
+
+        let selected = MePool::non_socks_bind_ip_for_stun(IpFamily::V4, Some(egress));
+
+        assert_eq!(selected, Some(bind_ip));
+    }
+
+    #[test]
+    fn shadowsocks_route_uses_local_addr_for_stun() {
+        let local_addr: SocketAddr = "198.51.100.30:40001".parse().unwrap();
+        let egress = UpstreamEgressInfo {
+            upstream_id: 1,
+            route_kind: UpstreamRouteKind::Shadowsocks,
+            local_addr: Some(local_addr),
+            direct_bind_ip: None,
+            socks_bound_addr: None,
+            socks_proxy_addr: None,
+        };
+
+        let selected = MePool::non_socks_bind_ip_for_stun(IpFamily::V4, Some(egress));
+
+        assert_eq!(selected, Some(local_addr.ip()));
+    }
+
+    #[test]
+    fn shadowsocks_route_reuses_proxy_kdf_policy() {
+        let local_addr: SocketAddr = "198.51.100.31:40003".parse().unwrap();
+        let egress = UpstreamEgressInfo {
+            upstream_id: 3,
+            route_kind: UpstreamRouteKind::Shadowsocks,
+            local_addr: Some(local_addr),
+            direct_bind_ip: None,
+            socks_bound_addr: None,
+            socks_proxy_addr: None,
+        };
+
+        assert!(MePool::uses_proxy_kdf_policy(Some(egress)));
+        assert_eq!(MePool::proxy_kdf_route_label(Some(egress)), "Shadowsocks");
+    }
+
+    #[test]
+    fn shadowsocks_route_accepts_bound_addr_from_relay() {
+        let bound_addr: SocketAddr = "1.1.1.1:45000".parse().unwrap();
+        let egress = UpstreamEgressInfo {
+            upstream_id: 4,
+            route_kind: UpstreamRouteKind::Shadowsocks,
+            local_addr: Some("198.51.100.31:40003".parse().unwrap()),
+            direct_bind_ip: None,
+            socks_bound_addr: Some(bound_addr),
+            socks_proxy_addr: Some("127.0.0.1:19080".parse().unwrap()),
+        };
+
+        let selected = MePool::select_socks_bound_addr(IpFamily::V4, Some(egress));
+
+        assert_eq!(selected, Some(bound_addr));
+    }
+
+    #[test]
+    fn socks_route_keeps_compat_fallback_unbound() {
+        let local_addr: SocketAddr = "198.51.100.40:40002".parse().unwrap();
+        let egress = UpstreamEgressInfo {
+            upstream_id: 2,
+            route_kind: UpstreamRouteKind::Socks5,
+            local_addr: Some(local_addr),
+            direct_bind_ip: None,
+            socks_bound_addr: None,
+            socks_proxy_addr: Some("198.51.100.50:1080".parse().unwrap()),
+        };
+
+        let selected = MePool::non_socks_bind_ip_for_stun(IpFamily::V4, Some(egress));
+
+        assert!(MePool::uses_proxy_kdf_policy(Some(egress)));
+        assert_eq!(selected, None);
     }
 }

@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -23,6 +25,7 @@ use crate::error::{ProxyError, Result};
 use crate::network::dns_overrides::{resolve_socket_addr, split_host_port};
 use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4, TG_DATACENTERS_V6};
 use crate::stats::Stats;
+use crate::transport::relay::connect_relay;
 use crate::transport::shadowsocks::{
     ShadowsocksStream, connect_shadowsocks, sanitize_shadowsocks_url,
 };
@@ -173,6 +176,7 @@ pub struct StartupPingResult {
     pub both_available: bool,
 }
 
+/// Transport stream returned by an upstream connection attempt.
 pub enum UpstreamStream {
     Tcp(TcpStream),
     Shadowsocks(Box<ShadowsocksStream>),
@@ -188,12 +192,41 @@ impl std::fmt::Debug for UpstreamStream {
 }
 
 impl UpstreamStream {
+    pub(crate) fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        match self {
+            Self::Tcp(stream) => stream.local_addr(),
+            Self::Shadowsocks(stream) => stream.get_ref().local_addr(),
+        }
+    }
+
+    pub(crate) fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        match self {
+            Self::Tcp(stream) => stream.peer_addr(),
+            Self::Shadowsocks(stream) => stream.get_ref().peer_addr(),
+        }
+    }
+
+    pub(crate) fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_nodelay(nodelay),
+            Self::Shadowsocks(stream) => stream.get_ref().set_nodelay(nodelay),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn raw_fd(&self) -> RawFd {
+        match self {
+            Self::Tcp(stream) => stream.as_raw_fd(),
+            Self::Shadowsocks(stream) => stream.get_ref().as_raw_fd(),
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn into_tcp(self) -> Result<TcpStream> {
         match self {
             Self::Tcp(stream) => Ok(stream),
             Self::Shadowsocks(_) => Err(ProxyError::Config(
-                "shadowsocks upstreams are not supported when general.use_middle_proxy = true"
-                    .to_string(),
+                "selected upstream does not expose a raw TCP stream".to_string(),
             )),
         }
     }
@@ -434,10 +467,17 @@ impl UpstreamManager {
             UpstreamType::Direct { .. } => (UpstreamRouteKind::Direct, "direct".to_string()),
             UpstreamType::Socks4 { address, .. } => (UpstreamRouteKind::Socks4, address.clone()),
             UpstreamType::Socks5 { address, .. } => (UpstreamRouteKind::Socks5, address.clone()),
-            UpstreamType::Shadowsocks { url, .. } => (
-                UpstreamRouteKind::Shadowsocks,
-                sanitize_shadowsocks_url(url).unwrap_or_else(|_| "invalid".to_string()),
-            ),
+            UpstreamType::Shadowsocks {
+                url, relay_address, ..
+            } => {
+                let mut route =
+                    sanitize_shadowsocks_url(url).unwrap_or_else(|_| "invalid".to_string());
+                if let Some(relay_address) = relay_address.as_deref() {
+                    route.push_str(" via relay://");
+                    route.push_str(relay_address);
+                }
+                (UpstreamRouteKind::Shadowsocks, route)
+            }
         }
     }
 
@@ -744,13 +784,13 @@ impl UpstreamManager {
         Ok(stream)
     }
 
-    /// Connect to target through a selected upstream and return egress details.
-    pub async fn connect_with_details(
+    /// Connect to target through a selected upstream and return transport egress details.
+    pub(crate) async fn connect_stream_with_details(
         &self,
         target: SocketAddr,
         dc_idx: Option<i16>,
         scope: Option<&str>,
-    ) -> Result<(TcpStream, UpstreamEgressInfo)> {
+    ) -> Result<(UpstreamStream, UpstreamEgressInfo)> {
         let idx = self
             .select_upstream(dc_idx, scope)
             .await
@@ -773,6 +813,20 @@ impl UpstreamManager {
 
         let (stream, egress) = self
             .connect_selected_upstream(idx, upstream, target, dc_idx, bind_rr)
+            .await?;
+        Ok((stream, egress))
+    }
+
+    /// Connect to target through a selected upstream and return egress details.
+    #[allow(dead_code)]
+    pub async fn connect_with_details(
+        &self,
+        target: SocketAddr,
+        dc_idx: Option<i16>,
+        scope: Option<&str>,
+    ) -> Result<(TcpStream, UpstreamEgressInfo)> {
+        let (stream, egress) = self
+            .connect_stream_with_details(target, dc_idx, scope)
             .await?;
         Ok((stream.into_tcp()?, egress))
     }
@@ -1162,20 +1216,63 @@ impl UpstreamManager {
                     },
                 ))
             }
-            UpstreamType::Shadowsocks { url, interface } => {
-                let stream = connect_shadowsocks(url, interface, target, connect_timeout).await?;
-                let local_addr = stream.get_ref().local_addr().ok();
+            UpstreamType::Shadowsocks {
+                url,
+                interface,
+                relay_address,
+                relay_token,
+            } => {
+                if let Some(relay_address) = relay_address.as_deref() {
+                    let relay_proxy_addr = relay_address.parse::<SocketAddr>().map_err(|_| {
+                        ProxyError::Config(format!(
+                            "invalid shadowsocks relay_address: {relay_address}"
+                        ))
+                    })?;
+                    let mut stream =
+                        connect_shadowsocks(url, interface, relay_proxy_addr, connect_timeout)
+                            .await?;
+                    let bound = match tokio::time::timeout(
+                        connect_timeout,
+                        connect_relay(&mut stream, target, relay_token.as_deref()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(bound)) => bound,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            return Err(ProxyError::ConnectionTimeout {
+                                addr: target.to_string(),
+                            });
+                        }
+                    };
+                    let local_addr = stream.get_ref().local_addr().ok();
                     Ok((
                         UpstreamStream::Shadowsocks(Box::new(stream)),
                         UpstreamEgressInfo {
-                        upstream_id,
-                        route_kind: UpstreamRouteKind::Shadowsocks,
-                        local_addr,
-                        direct_bind_ip: None,
-                        socks_bound_addr: None,
-                        socks_proxy_addr: None,
-                    },
-                ))
+                            upstream_id,
+                            route_kind: UpstreamRouteKind::Shadowsocks,
+                            local_addr,
+                            direct_bind_ip: None,
+                            socks_bound_addr: Some(bound.addr),
+                            socks_proxy_addr: Some(relay_proxy_addr),
+                        },
+                    ))
+                } else {
+                    let stream =
+                        connect_shadowsocks(url, interface, target, connect_timeout).await?;
+                    let local_addr = stream.get_ref().local_addr().ok();
+                    Ok((
+                        UpstreamStream::Shadowsocks(Box::new(stream)),
+                        UpstreamEgressInfo {
+                            upstream_id,
+                            route_kind: UpstreamRouteKind::Shadowsocks,
+                            local_addr,
+                            direct_bind_ip: None,
+                            socks_bound_addr: None,
+                            socks_proxy_addr: None,
+                        },
+                    ))
+                }
             }
         }
     }
@@ -1762,6 +1859,7 @@ impl UpstreamManager {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use tokio::net::TcpListener;
 
     use crate::stats::Stats;
 
@@ -1892,6 +1990,8 @@ mod tests {
                 upstream_type: UpstreamType::Shadowsocks {
                     url: TEST_SHADOWSOCKS_URL.to_string(),
                     interface: None,
+                    relay_address: None,
+                    relay_token: None,
                 },
                 weight: 2,
                 enabled: true,
@@ -1915,5 +2015,41 @@ mod tests {
             UpstreamRouteKind::Shadowsocks
         );
         assert_eq!(snapshot.upstreams[0].address, "127.0.0.1:8388");
+    }
+
+    #[tokio::test]
+    async fn connect_with_details_keeps_direct_tcp_compatibility() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            let (_stream, _peer) = listener.accept().await.unwrap();
+        });
+        let manager = UpstreamManager::new(
+            vec![UpstreamConfig {
+                upstream_type: UpstreamType::Direct {
+                    interface: None,
+                    bind_addresses: None,
+                },
+                weight: 1,
+                enabled: true,
+                scopes: String::new(),
+                selected_scope: String::new(),
+            }],
+            1,
+            100,
+            1000,
+            1,
+            false,
+            Arc::new(Stats::new()),
+        );
+
+        let (stream, egress) = manager
+            .connect_with_details(target, None, None)
+            .await
+            .expect("direct upstream should return a raw TCP stream");
+
+        assert_eq!(stream.peer_addr().unwrap(), target);
+        assert_eq!(egress.route_kind, UpstreamRouteKind::Direct);
+        accept_task.await.unwrap();
     }
 }

@@ -122,15 +122,20 @@ enabled = true
 ```
 
 #### Shadowsocks as Upstream
-Requires `use_middle_proxy = false`.
+Works with both `use_middle_proxy = false` and `use_middle_proxy = true`.
+In ME mode, `general.me_socks_kdf_policy = "compat"` reuses the proxy-route fallback path when the upstream does not provide a public bound address.
+If the Shadowsocks server can reach a local Telemt relay on the same host, add `relay_address` and `relay_token` so Telemt receives a real `BND.ADDR/BND.PORT` through the Shadowsocks tunnel without a SOCKS hop.
 
 ```toml
 [general]
-use_middle_proxy = false
+use_middle_proxy = true
+me_socks_kdf_policy = "compat"
 
 [[upstreams]]
 type = "shadowsocks"
 url = "ss://2022-blake3-aes-256-gcm:BASE64_KEY@1.2.3.4:8388"
+relay_address = "10.129.0.4:19080"
+relay_token = "relay-secret"
 weight = 1
 enabled = true
 ```
