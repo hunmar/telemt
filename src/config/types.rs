@@ -106,7 +106,7 @@ impl std::fmt::Display for MeTelemetryLevel {
     }
 }
 
-/// Middle-End SOCKS KDF fallback policy.
+/// Middle-End proxy-route KDF fallback policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MeSocksKdfPolicy {
@@ -1498,6 +1498,10 @@ pub enum UpstreamType {
         url: String,
         #[serde(default)]
         interface: Option<String>,
+        #[serde(default)]
+        relay_address: Option<String>,
+        #[serde(default)]
+        relay_token: Option<String>,
     },
 }
 

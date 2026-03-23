@@ -1,20 +1,22 @@
 //! SOCKS4/5 Client Implementation
 
-use std::net::{IpAddr, SocketAddr};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use crate::error::{ProxyError, Result};
+use std::net::{IpAddr, SocketAddr};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SocksBoundAddr {
     pub addr: SocketAddr,
 }
 
-pub async fn connect_socks4(
-    stream: &mut TcpStream,
+pub async fn connect_socks4<S>(
+    stream: &mut S,
     target: SocketAddr,
     user_id: Option<&str>,
-) -> Result<SocksBoundAddr> {
+) -> Result<SocksBoundAddr>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let ip = match target.ip() {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(_) => return Err(ProxyError::Proxy("SOCKS4 does not support IPv6".to_string())),
@@ -50,12 +52,15 @@ pub async fn connect_socks4(
     })
 }
 
-pub async fn connect_socks5(
-    stream: &mut TcpStream,
+pub async fn connect_socks5<S>(
+    stream: &mut S,
     target: SocketAddr,
     username: Option<&str>,
     password: Option<&str>,
-) -> Result<SocksBoundAddr> {
+) -> Result<SocksBoundAddr>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // 1. Auth negotiation
     // VER (1) | NMETHODS (1) | METHODS (variable)
     let mut methods = vec![0u8]; // No auth

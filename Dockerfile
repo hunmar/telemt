@@ -20,7 +20,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
 
 # Build
 COPY . .
-RUN cargo build --release && strip target/release/telemt
+RUN cargo build --release && strip target/release/telemt target/release/telemt-ss-relay || true
 
 # ==========================
 # Stage 2: Compress (strip + UPX)
@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils \
     curl \
     ca-certificates \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     \
     # install UPX from Telemt releases
@@ -47,9 +48,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /tmp/upx*
 
 COPY --from=builder /build/target/release/telemt /telemt
+COPY --from=builder /build/target/release/telemt-ss-relay /telemt-ss-relay
 
 RUN strip /telemt || true
+RUN strip /telemt-ss-relay || true
 RUN upx --best --lzma /telemt || true
+RUN upx --best --lzma /telemt-ss-relay || true
 
 # ==========================
 # Stage 3: Debug base
@@ -72,6 +76,7 @@ FROM debug-base AS debug
 WORKDIR /app
 
 COPY --from=minimal /telemt /app/telemt
+COPY --from=minimal /telemt-ss-relay /app/telemt-ss-relay
 COPY config.toml /app/config.toml
 
 USER root
@@ -91,12 +96,14 @@ FROM gcr.io/distroless/base-debian12 AS prod
 WORKDIR /app
 
 COPY --from=minimal /telemt /app/telemt
+COPY --from=minimal /telemt-ss-relay /app/telemt-ss-relay
 COPY config.toml /app/config.toml
 
 # TLS + timezone + shell
 COPY --from=debug-base /etc/ssl/certs /etc/ssl/certs
 COPY --from=debug-base /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=debug-base /bin/busybox /bin/busybox
+COPY --from=debug-base /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
 
 RUN ["/bin/busybox", "--install", "-s", "/bin"]
 

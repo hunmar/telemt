@@ -238,8 +238,16 @@ pub async fn format_me_route(
             }
             UpstreamType::Socks4 { address, .. } => format!("socks4://{address}"),
             UpstreamType::Socks5 { address, .. } => format!("socks5://{address}"),
-            UpstreamType::Shadowsocks { url, .. } => sanitize_shadowsocks_url(url)
-                .map(|address| format!("shadowsocks://{address}"))
+            UpstreamType::Shadowsocks {
+                url, relay_address, ..
+            } => sanitize_shadowsocks_url(url)
+                .map(|address| {
+                    if let Some(relay_address) = relay_address.as_deref() {
+                        format!("shadowsocks://{address} via relay://{relay_address}")
+                    } else {
+                        format!("shadowsocks://{address}")
+                    }
+                })
                 .unwrap_or_else(|_| "shadowsocks://invalid".to_string()),
         };
     }

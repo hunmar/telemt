@@ -97,6 +97,8 @@ Defaults below are code defaults (used when a key is omitted), not necessarily v
 | `password` | `socks5` | `Option<String>` | no | `null` | SOCKS5 password auth. |
 | `url` | `shadowsocks` | `String` | yes | n/a | Shadowsocks SIP002 URL (`ss://...`). Only `host:port` is exposed in runtime APIs. |
 | `interface` | `shadowsocks` | `Option<String>` | no | `null` | Optional outgoing bind interface or literal local IP. |
+| `relay_address` | `shadowsocks` | `Option<String>` | no | `null` | Optional `ip:port` of the Telemt relay reached through the Shadowsocks tunnel before the final dial. |
+| `relay_token` | `shadowsocks` | `Option<String>` | no | `null` | Shared secret required when `relay_address` is set. |
 
 ### Runtime rules (important)
 
@@ -116,8 +118,9 @@ Defaults below are code defaults (used when a key is omitted), not necessarily v
 7. Runtime DNS overrides are used for upstream hostname resolution.
 8. In ME mode, the selected upstream is also used for ME TCP dial path.
 9. In ME mode for `direct` upstream with bind/interface, STUN reflection logic is bind-aware for KDF source material.
-10. In ME mode for SOCKS upstream, SOCKS `BND.ADDR/BND.PORT` is used for KDF when it is valid/public for the same family.
-11. `shadowsocks` upstreams work in both Direct and ME modes. In ME mode, the connected local Shadowsocks address is reused for bind-aware STUN reflection when available.
+10. In ME mode for `socks4/socks5` upstreams, SOCKS `BND.ADDR/BND.PORT` is used for KDF when it is valid/public for the same family.
+11. In ME mode for `shadowsocks` upstreams with `relay_address`, the Telemt relay returns the real outbound `BND.ADDR/BND.PORT`, and that tuple is reused for KDF on the same path as native SOCKS upstreams.
+12. In ME mode for plain `shadowsocks` upstreams without `relay_address`, the same `general.me_socks_kdf_policy` strict/compat path is reused. When compat fallback is selected, the connected local Shadowsocks address is reused for bind-aware STUN reflection when available.
 
 ## Upstream Configuration Examples
 
@@ -166,7 +169,22 @@ weight = 2
 enabled = true
 ```
 
-### Example 5: Mixed upstreams with scopes
+### Example 5: Shadowsocks upstream with Telemt relay
+
+```toml
+[general]
+use_middle_proxy = true
+
+[[upstreams]]
+type = "shadowsocks"
+url = "ss://2022-blake3-aes-256-gcm:BASE64_KEY@198.51.100.50:8388"
+relay_address = "10.129.0.4:19080"
+relay_token = "relay-secret"
+weight = 2
+enabled = true
+```
+
+### Example 6: Mixed upstreams with scopes
 
 ```toml
 [[upstreams]]

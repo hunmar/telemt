@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
-use tokio::sync::{Mutex, mpsc};
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 

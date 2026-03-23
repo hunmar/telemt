@@ -95,7 +95,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | unknown_dc_file_log_enabled | `bool` | `false` | — | Enables unknown-DC file logging. |
 | log_level | `"debug" \| "verbose" \| "normal" \| "silent"` | `"normal"` | — | Runtime logging verbosity. |
 | disable_colors | `bool` | `false` | — | Disables ANSI colors in logs. |
-| me_socks_kdf_policy | `"strict" \| "compat"` | `"strict"` | — | SOCKS-bound KDF fallback policy for ME handshake. |
+| me_socks_kdf_policy | `"strict" \| "compat"` | `"strict"` | — | Proxy-route KDF fallback policy for ME handshake (`socks4`, `socks5`, `shadowsocks`). |
 | me_route_backpressure_base_timeout_ms | `u64` | `25` | Must be `> 0`. | Base backpressure timeout for route-channel send (ms). |
 | me_route_backpressure_high_timeout_ms | `u64` | `120` | Must be `>= me_route_backpressure_base_timeout_ms`. | High backpressure timeout when queue occupancy exceeds watermark (ms). |
 | me_route_backpressure_high_watermark_pct | `u8` | `80` | `1..=100`. | Queue occupancy threshold (%) for high timeout mode. |
@@ -282,7 +282,7 @@ This document lists all configuration keys accepted by `config.toml`.
 
 | Parameter | Type | Default | Constraints / validation | Description |
 |---|---|---|---|---|
-| type | `"direct" \| "socks4" \| "socks5"` | — | Required field. | Upstream transport type selector. |
+| type | `"direct" \| "socks4" \| "socks5" \| "shadowsocks"` | — | Required field. | Upstream transport type selector. |
 | weight | `u16` | `1` | none | Base weight used by weighted-random upstream selection. |
 | enabled | `bool` | `true` | none | Disabled entries are excluded from upstream selection at runtime. |
 | scopes | `String` | `""` | none | Comma-separated scope tags used for request-level upstream filtering. |
@@ -292,3 +292,6 @@ This document lists all configuration keys accepted by `config.toml`.
 | user_id | `String \| null` | `null` | Only for `type = "socks4"`. | SOCKS4 CONNECT user ID (`type = "socks4"` only). |
 | username | `String \| null` | `null` | Only for `type = "socks5"`. | SOCKS5 username (`type = "socks5"` only). |
 | password | `String \| null` | `null` | Only for `type = "socks5"`. | SOCKS5 password (`type = "socks5"` only). |
+| url | `String` | — | Required for `type = "shadowsocks"`; must be a valid SIP002 URL without plugins. | Shadowsocks server URL. |
+| relay_address | `String \| null` | `null` | Only for `type = "shadowsocks"`; must be `ip:port`. | Optional Telemt relay address reached through the Shadowsocks tunnel before the final Telegram dial. |
+| relay_token | `String \| null` | `null` | Required with `relay_address`; max 255 bytes. | Shared secret used by the Telemt relay handshake. |

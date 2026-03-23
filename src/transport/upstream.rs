@@ -25,6 +25,7 @@ use crate::error::{ProxyError, Result};
 use crate::network::dns_overrides::{resolve_socket_addr, split_host_port};
 use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4, TG_DATACENTERS_V6};
 use crate::stats::Stats;
+use crate::transport::relay::connect_relay;
 use crate::transport::shadowsocks::{
     ShadowsocksStream, connect_shadowsocks, sanitize_shadowsocks_url,
 };
@@ -466,10 +467,17 @@ impl UpstreamManager {
             UpstreamType::Direct { .. } => (UpstreamRouteKind::Direct, "direct".to_string()),
             UpstreamType::Socks4 { address, .. } => (UpstreamRouteKind::Socks4, address.clone()),
             UpstreamType::Socks5 { address, .. } => (UpstreamRouteKind::Socks5, address.clone()),
-            UpstreamType::Shadowsocks { url, .. } => (
-                UpstreamRouteKind::Shadowsocks,
-                sanitize_shadowsocks_url(url).unwrap_or_else(|_| "invalid".to_string()),
-            ),
+            UpstreamType::Shadowsocks {
+                url, relay_address, ..
+            } => {
+                let mut route =
+                    sanitize_shadowsocks_url(url).unwrap_or_else(|_| "invalid".to_string());
+                if let Some(relay_address) = relay_address.as_deref() {
+                    route.push_str(" via relay://");
+                    route.push_str(relay_address);
+                }
+                (UpstreamRouteKind::Shadowsocks, route)
+            }
         }
     }
 
@@ -1208,20 +1216,63 @@ impl UpstreamManager {
                     },
                 ))
             }
-            UpstreamType::Shadowsocks { url, interface } => {
-                let stream = connect_shadowsocks(url, interface, target, connect_timeout).await?;
-                let local_addr = stream.get_ref().local_addr().ok();
+            UpstreamType::Shadowsocks {
+                url,
+                interface,
+                relay_address,
+                relay_token,
+            } => {
+                if let Some(relay_address) = relay_address.as_deref() {
+                    let relay_proxy_addr = relay_address.parse::<SocketAddr>().map_err(|_| {
+                        ProxyError::Config(format!(
+                            "invalid shadowsocks relay_address: {relay_address}"
+                        ))
+                    })?;
+                    let mut stream =
+                        connect_shadowsocks(url, interface, relay_proxy_addr, connect_timeout)
+                            .await?;
+                    let bound = match tokio::time::timeout(
+                        connect_timeout,
+                        connect_relay(&mut stream, target, relay_token.as_deref()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(bound)) => bound,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            return Err(ProxyError::ConnectionTimeout {
+                                addr: target.to_string(),
+                            });
+                        }
+                    };
+                    let local_addr = stream.get_ref().local_addr().ok();
                     Ok((
                         UpstreamStream::Shadowsocks(Box::new(stream)),
                         UpstreamEgressInfo {
-                        upstream_id,
-                        route_kind: UpstreamRouteKind::Shadowsocks,
-                        local_addr,
-                        direct_bind_ip: None,
-                        socks_bound_addr: None,
-                        socks_proxy_addr: None,
-                    },
-                ))
+                            upstream_id,
+                            route_kind: UpstreamRouteKind::Shadowsocks,
+                            local_addr,
+                            direct_bind_ip: None,
+                            socks_bound_addr: Some(bound.addr),
+                            socks_proxy_addr: Some(relay_proxy_addr),
+                        },
+                    ))
+                } else {
+                    let stream =
+                        connect_shadowsocks(url, interface, target, connect_timeout).await?;
+                    let local_addr = stream.get_ref().local_addr().ok();
+                    Ok((
+                        UpstreamStream::Shadowsocks(Box::new(stream)),
+                        UpstreamEgressInfo {
+                            upstream_id,
+                            route_kind: UpstreamRouteKind::Shadowsocks,
+                            local_addr,
+                            direct_bind_ip: None,
+                            socks_bound_addr: None,
+                            socks_proxy_addr: None,
+                        },
+                    ))
+                }
             }
         }
     }
@@ -1939,6 +1990,8 @@ mod tests {
                 upstream_type: UpstreamType::Shadowsocks {
                     url: TEST_SHADOWSOCKS_URL.to_string(),
                     interface: None,
+                    relay_address: None,
+                    relay_token: None,
                 },
                 weight: 2,
                 enabled: true,
